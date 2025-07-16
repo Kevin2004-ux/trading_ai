@@ -1,0 +1,11 @@
+# requirements.txt
+flask
+google-generativeai
+pinecone
+python-dotenv
+requests
+pandas
+numpy
+scikit-learn
+joblib
+matplotlib
