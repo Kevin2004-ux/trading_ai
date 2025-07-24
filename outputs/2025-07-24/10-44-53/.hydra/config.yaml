@@ -1,0 +1,12 @@
+feature_list:
+- sma_50
+- rsi
+- macd
+- relative_volume
+history_years: 3
+profit_threshold: 0.02
+future_days: 20
+epochs: 100
+learning_rate: 0.001
+initial_capital: 100000.0
+commission: 0.001

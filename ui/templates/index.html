@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Trading AI Interface</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        body { background-color: #f8f9fa; }
+        .chat-container { max-width: 800px; margin: 50px auto; }
+        .chat-box { height: 60vh; overflow-y: scroll; border: 1px solid #ddd; padding: 15px; background: white; border-radius: 5px; }
+        .message { margin-bottom: 15px; display: flex; }
+        .user-message { justify-content: flex-end; }
+        .bot-message .card { background-color: #e9ecef; }
+        .message .card { max-width: 80%; }
+        .spinner-border { width: 1.5rem; height: 1.5rem; }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <h2 class="text-center mb-4">Trading AI Interface</h2>
+        <div class="chat-box" id="chat-box">
+            <div class="message bot-message">
+                <div class="card card-body">Hello! I am your AI Analyst. Ask me for a forecast. For example: "What's the outlook for NVDA?"</div>
+            </div>
+        </div>
+        <form id="chat-form" class="mt-3">
+            <div class="input-group">
+                <input type="text" id="user-input" class="form-control" placeholder="Ask a question..." required>
+                <button class="btn btn-primary" type="submit" id="send-button">Send</button>
+            </div>
+        </form>
+    </div>
+
+<script>
+    const chatForm = document.getElementById('chat-form');
+    const userInput = document.getElementById('user-input');
+    const chatBox = document.getElementById('chat-box');
+
+    chatForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const question = userInput.value;
+        if (!question.trim()) return;
+
+        addMessage(question, 'user');
+        userInput.value = '';
+        
+        const thinkingIndicator = addMessage('<div class="spinner-border text-secondary" role="status"></div>', 'bot');
+
+        try {
+            // Call our new "/ask" endpoint with the full question
+            const response = await fetch('/ask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question: question })
+            });
+
+            const data = await response.json();
+            
+            // Use the "marked" library to render the AI's Markdown response
+            const botResponse = marked.parse(data.answer);
+            thinkingIndicator.querySelector('.card-body').innerHTML = botResponse;
+
+        } catch (error) {
+            thinkingIndicator.querySelector('.card-body').innerHTML = '<p class="text-danger">Error connecting to the API server.</p>';
+        }
+    });
+
+    function addMessage(text, sender) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${sender}-message`;
+        const cardDiv = document.createElement('div');
+        cardDiv.className = 'card card-body';
+        if (sender === 'user') {
+            cardDiv.textContent = text;
+        } else {
+            cardDiv.innerHTML = text;
+        }
+        messageDiv.appendChild(cardDiv);
+        chatBox.appendChild(messageDiv);
+        chatBox.scrollTop = chatBox.scrollHeight;
+        return messageDiv;
+    }
+</script>
+</body>
+</html>

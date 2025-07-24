@@ -1,0 +1,21 @@
+# configs/config.yaml
+
+# These are the default parameters for our entire system.
+# We can now change any of these without touching the Python code.
+
+defaults:
+  - _self_
+
+# Feature & Data Labeling Parameters
+feature_list: ['sma_50', 'rsi', 'macd', 'relative_volume']
+history_years: 3
+profit_threshold: 0.02
+future_days: 20
+
+# Model Training Hyperparameters
+epochs: 100
+learning_rate: 0.001
+
+# Backtest Settings
+initial_capital: 100000.0
+commission: 0.001

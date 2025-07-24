@@ -1,0 +1,16 @@
+# test_ibkr_connection.py
+
+from data_ingest import IBKRClient
+
+print("--- 🧪 Testing IBKR Connection ---")
+
+# This will attempt to connect when it's created
+client = IBKRClient()
+
+if client.ib.isConnected():
+    print("Connection test successful. Disconnecting.")
+    client.ib.disconnect()
+else:
+    print("Connection test failed.")
+
+print("--- ✅ Test Complete ---")

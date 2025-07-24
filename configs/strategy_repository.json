@@ -1,0 +1,23 @@
+{
+    "regime_0": {
+        "notes": "Strategy for the first market regime (e.g., Bear Market)",
+        "best_params": {
+            "profit_target": 0.15575978643509591,
+            "stop_loss": 0.0969643941359089
+        },
+        "best_return": 47.89896326310071
+    },
+    "regime_1": {
+        "notes": "Strategy for the second market regime (e.g., Sideways Market)",
+        "best_params": {
+            "profit_target": 0.19875718604476053,
+            "stop_loss": 0.052497345961388
+        },
+        "best_return": 50.511271587366444
+    },
+    "regime_2": {
+        "notes": "Strategy for the third market regime (e.g., Bull Market)",
+        "best_params": null,
+        "best_return": null
+    }
+}

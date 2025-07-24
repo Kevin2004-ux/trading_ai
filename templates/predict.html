@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Live Forecast for {{ ticker }}{% endblock %}
+
+{% block content %}
+  <a href="{{ url_for('library') }}">&larr; Back</a>
+  <h1 class="mt-3">Live Forecast: <span class="text-primary">{{ ticker }}</span></h1>
+  
+  {% if prediction %}
+    <div class="row mt-4">
+      <div class="col-md-4">
+        <div class="card shadow-sm">
+          <div class="card-header">
+            <h4>Forecast Summary</h4>
+          </div>
+          <div class="card-body">
+            <h5 class="card-title">Adjusted Forecast (R_adj)</h5>
+            {% if prediction.adjusted_forecast > 0 %}
+              <p class="card-text fs-4 text-success">{{ "%.2f"|format(prediction.adjusted_forecast * 100) }}%</p>
+            {% elif prediction.adjusted_forecast < 0 %}
+              <p class="card-text fs-4 text-danger">{{ "%.2f"|format(prediction.adjusted_forecast * 100) }}%</p>
+            {% else %}
+              <p class="card-text fs-4 text-muted">Neutral</p>
+            {% endif %}
+            <hr>
+            <small class="text-muted">Raw Ensemble Forecast (ŷ_raw): {{ "%.4f"|format(prediction.raw_forecast) }}</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-8">
+        <h4>Recommended Option Strategies</h4>
+        {% if prediction.recommended_options %}
+          <div class="list-group">
+            {% for opt in prediction.recommended_options %}
+              <div class="list-group-item">
+                <div class="d-flex w-100 justify-content-between">
+                  <h5 class="mb-1">{{ opt.strategy_type }} @ ${{ "%.2f"|format(opt.strike_price) }}</h5>
+                  <small>{{ opt.expiry_days }} days to expiry</small>
+                </div>
+                <p class="mb-1">
+                  This strategy has an expected P&L of <strong>${{ "%.2f"|format(opt.expected_pnl_per_share) }}</strong> per share, based on our forecast.
+                </p>
+                <small class="text-muted">Premium (Cost): ${{ "%.2f"|format(opt.premium) }} | Risk/Reward Ratio: {{ "%.2f"|format(opt.risk_reward_ratio) }}</small>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="alert alert-warning">No suitable option strategies were found based on the current forecast.</div>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    <div class="alert alert-danger mt-4" role="alert">
+      <strong>Prediction Failed.</strong> Could not generate a forecast for {{ ticker }}. Please check the console for errors.
+    </div>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,20 @@
+# mkdocs.yml
+site_name: TRADING_AI Quant Platform
+site_description: Documentation for the TRADING_AI quantitative trading system.
+
+theme:
+  name: material
+  palette:
+    # Palette toggle for light vs dark modes
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+# We are temporarily simplifying the navigation to only include the homepage.
+nav:
+  - Home: index.md

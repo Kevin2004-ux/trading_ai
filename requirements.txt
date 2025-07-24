@@ -1,11 +1,40 @@
 # requirements.txt
-flask
-google-generativeai
-pinecone
-python-dotenv
-requests
+
+# --- AI & Modeling ---
+torch
+torchvision
+torchaudio
 pandas
 numpy
 scikit-learn
-joblib
-matplotlib
+hmmlearn
+pysr
+shap
+google-generativeai
+pinecone
+textblob
+
+# --- Financial Modeling ---
+py_vollib
+
+# --- Application & API ---
+fastapi
+uvicorn[standard]
+
+# --- Automation & MLOps ---
+apache-airflow
+mkdocs
+mkdocs-material
+
+# --- Data & File Formats ---
+pyarrow
+
+# --- Testing ---
+pytest
+pytest-mock
+
+# --- Utilities ---
+python-dotenv
+tqdm
+requests
+ib-insync

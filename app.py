@@ -1,84 +1,70 @@
-# app.py
-
 import os
 import json
-from flask import Flask, render_template, request, jsonify, abort
+from flask import Flask, render_template, request, jsonify
 import google.generativeai as genai
-import pinecone
 
-# --- Initialization with Hardcoded Example Keys ---
+# --- Import project modules ---
+import config
+from tools.get_forecast import get_forecast
+from tools.get_candidates import get_candidates
+from prompts import TRANSLATOR_SYSTEM_PROMPT
+
+# --- Initialize Flask App ---
 app = Flask(__name__)
 
-# Configure Gemini
-genai.configure(api_key="AIzaSyC22qRusjJj8hQpxmBYuHct7P9BuKacZM8")
-chat_model = genai.GenerativeModel('gemini-1.5-flash')
-
-# Initialize Pinecone
-pc = pinecone.Pinecone(api_key="pcsk_4BBWsX_Q2VD8YiMc9SpKuNjijQmXeoYVaMUBPMP2WvWWSvStmsiTi5AdLDtHw5y8ie5jKq")
-INDEX_NAME = "trade-signal-library"
-index = pc.Index(INDEX_NAME)
-# ---------------------------------------------
-
-# Load the final, analyzed patterns for the library page
+# --- Configure the Gemini LLM with our tools and persona ---
 try:
-    with open("final_analysis.jsonl") as f:
-        PATTERNS = [json.loads(line) for line in f]
-except FileNotFoundError:
-    print("Warning: final_analysis.jsonl not found. Run the full data pipeline first.")
-    PATTERNS = []
+    genai.configure(api_key=config.GEMINI_API_KEY)
 
-# --- Routes ---
+    # Create the model and give it its "job description"
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-pro",
+        tools=[get_forecast, get_candidates],
+        system_instruction=TRANSLATOR_SYSTEM_PROMPT
+    )
+    print("Gemini Model configured successfully.")
+except Exception as e:
+    print(f"Error configuring Gemini Model: {e}")
+    model = None
+
+# --- Main Application Routes ---
 @app.route("/")
-@app.route("/library")
-def library():
-    """Renders the main pattern library page."""
-    return render_template("library.html", patterns=PATTERNS, active='library')
-
-@app.route("/alerts")
-def alerts():
-    """Renders the live alerts page (placeholder)."""
-    return render_template("alerts.html", alerts=[], active='alerts')
-
-@app.route("/pattern/<pattern_id>")
-def pattern_detail(pattern_id):
-    """Renders the detail page for a specific analyzed pattern."""
-    pattern = next((p for p in PATTERNS if p['pattern_id'] == pattern_id), None)
-    if not pattern:
-        abort(404)
-    return render_template("pattern_detail.html", pattern=pattern)
+def index():
+    """Renders the main chat interface page."""
+    return render_template("index.html")
 
 @app.route("/ask", methods=["POST"])
 def ask():
-    """Handles a user's question about a specific pattern."""
-    data = request.json
-    question = data.get("question", "").strip()
-    pattern_id = data.get("pattern_id", "").strip()
-    if not question or not pattern_id:
-        return jsonify({"error": "Missing question or pattern_id"}), 400
+    """
+    This endpoint is the core of the Translator. It handles the user's question,
+    orchestrates the LLM and tool calls, and returns the final answer.
+    """
+    if model is None:
+        return jsonify({"error": "Gemini Model is not configured. Check API key."}), 500
 
-    # 1. Fetch the specific aggregated dossier from Pinecone to use as context
-    try:
-        fetch_response = index.fetch(ids=[pattern_id], namespace='vetted-patterns')
-        if not fetch_response['vectors'] or pattern_id not in fetch_response['vectors']:
-             return jsonify({"error": "Could not find that pattern in the smart library."}), 404
-        context = fetch_response['vectors'][pattern_id]['metadata']['dossier']
-    except Exception as e:
-        return jsonify({"error": f"Error fetching from Pinecone: {e}"}), 500
+    user_question = request.json.get("question")
+    if not user_question:
+        return jsonify({"error": "No question provided."}), 400
 
-    # 2. Build a prompt and ask Gemini for an expert explanation
-    prompt = (
-      f"You are an expert trading analyst. A user is asking a question about a specific trading pattern you have analyzed. "
-      f"Based ONLY on the following data dossier for that pattern, provide a clear and concise answer.\n\n"
-      f"--- Data Dossier ---\n{context}\n\n"
-      f"--- User's Question ---\n{question}\n\n"
-      f"ANSWER:"
-    )
-    
+    print(f"--- User question received: '{user_question}' ---")
+
     try:
-        response = chat_model.generate_content(prompt)
-        return jsonify(answer=response.text)
+        # Start a chat session with automatic function calling enabled
+        chat = model.start_chat(enable_automatic_function_calling=True)
+        
+        # Send the user's message. The model will automatically handle
+        # one or more tool calls until it has a final text answer.
+        response = chat.send_message(user_question)
+        
+        final_answer = response.text
+
+        print(f"--- Final answer generated. ---")
+        return jsonify({"answer": final_answer})
+
     except Exception as e:
-        return jsonify(error=f"Error generating response: {e}"), 500
+        print(f"An error occurred during chat generation: {e}")
+        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # The host must be 0.0.0.0 to be accessible from outside the Docker container
+    app.run(debug=True, host="0.0.0.0", port=5000)

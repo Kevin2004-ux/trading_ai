@@ -1,0 +1,14 @@
+[project]
+name = "trading_ai"
+version = "0.1.0"
+
+[tool.setuptools]
+packages = [
+    "data_ingest",
+    "feature_store",
+    "modeling",
+    "pipeline",
+    "retrain",
+    "ui",
+    "translator"
+]

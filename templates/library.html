@@ -1,12 +1,27 @@
-]{% extends "base.html" %}
-{% block title %}Pattern Library{% endblock %}
+{% extends "base.html" %}
+{% block title %}Prediction Engine{% endblock %}
+
 {% block content %}
-  <h1>Pattern Library</h1>
-  <p class="text-muted">A collection of all historical patterns discovered and validated by the AI.</p>
+  <div class="card mb-4 shadow-sm">
+    <div class="card-body">
+      <h5 class="card-title">Get a Live Forecast</h5>
+      <p class="card-text">Enter a stock ticker to run the real-time prediction engine.</p>
+      <form action="{{ url_for('library') }}" method="POST" class="row g-3">
+        <div class="col-auto">
+          <input type="text" class="form-control" name="ticker" id="ticker" placeholder="e.g., AAPL" required>
+        </div>
+        <div class="col-auto">
+          <button type="submit" class="btn btn-primary">Get Forecast</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <h1>Pattern Library (Legacy)</h1>
+  <p class="text-muted">A collection of all historical patterns discovered and validated by the old AI system.</p>
   <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4 mt-3">
     {% for pat in patterns %}
     <div class="col">
-      <div class="card h-100 shadow-sm">
+      <div class="card h-100">
         <div class="card-body d-flex flex-column">
           <h5 class="card-title">{{ pat.pattern_name }}</h5>
           <h6 class="card-subtitle mb-2 text-muted">{{ pat.pattern_id }}</h6>
@@ -15,13 +30,13 @@
             <strong>Down Rate:</strong> <span class="badge bg-danger">{{ (pat.down_rate * 100)|round(1) }}%</span>
           </p>
           <div class="mt-auto">
-            <a href="{{ url_for('pattern_detail', pattern_id=pat.pattern_id) }}" class="btn btn-sm btn-primary">View Deep-Dive Analysis</a>
+            <a href="{{ url_for('pattern_detail', pattern_id=pat.pattern_id) }}" class="btn btn-sm btn-outline-secondary">View Analysis</a>
           </div>
         </div>
       </div>
     </div>
     {% else %}
-    <div class="alert alert-warning">No pattern analysis found. Please run the full data pipeline first.</div>
+    <div class="alert alert-secondary">No legacy patterns found.</div>
     {% endfor %}
   </div>
 {% endblock %}

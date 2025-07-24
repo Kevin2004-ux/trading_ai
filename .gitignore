@@ -1,0 +1,18 @@
+# Environment files
+.env
+/venv/
+/trading_env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local data and model files
+*.pth
+*.parquet
+*.db
+/mlruns/
+
+# IDE and OS specific
+.vscode/
+.DS_Store
