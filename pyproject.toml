@@ -1,14 +1,51 @@
 [project]
 name = "trading_ai"
 version = "0.1.0"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "google-generativeai",
+    "pinecone",
+    "pandas",
+    "numpy",
+    "requests",
+    "python-dotenv",
+    "ib-insync",
+    "scipy",
+    "optuna",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-mock",
+    "httpx",
+]
 
 [tool.setuptools]
 packages = [
+    "agent",
+    "analytics",
     "data_ingest",
+    "diagnostics",
+    "engine",
     "feature_store",
+    "jobs",
+    "journal",
+    "memory",
     "modeling",
+    "paper",
     "pipeline",
+    "realtime",
+    "research",
+    "risk",
     "retrain",
+    "reports",
+    "scanner",
+    "selector",
+    "tracking",
+    "tools",
     "ui",
     "translator"
 ]

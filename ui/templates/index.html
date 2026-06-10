@@ -2,85 +2,536 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Trading AI Interface</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading AI Dashboard</title>
     <style>
-        body { background-color: #f8f9fa; }
-        .chat-container { max-width: 800px; margin: 50px auto; }
-        .chat-box { height: 60vh; overflow-y: scroll; border: 1px solid #ddd; padding: 15px; background: white; border-radius: 5px; }
-        .message { margin-bottom: 15px; display: flex; }
-        .user-message { justify-content: flex-end; }
-        .bot-message .card { background-color: #e9ecef; }
-        .message .card { max-width: 80%; }
-        .spinner-border { width: 1.5rem; height: 1.5rem; }
+        :root {
+            --bg: #f3efe2;
+            --panel: #fffaf0;
+            --panel-strong: #f7f1df;
+            --text: #1f2a1f;
+            --muted: #546152;
+            --accent: #0f6b5d;
+            --accent-strong: #08483f;
+            --border: #d7cfb6;
+            --warning: #8c5b18;
+            --shadow: 0 18px 40px rgba(51, 57, 41, 0.12);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Georgia, "Times New Roman", serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at top left, rgba(15, 107, 93, 0.12), transparent 32%),
+                linear-gradient(180deg, #f7f3e7 0%, var(--bg) 100%);
+            min-height: 100vh;
+        }
+
+        .shell {
+            width: min(1200px, calc(100% - 32px));
+            margin: 24px auto 48px;
+        }
+
+        .hero {
+            background: linear-gradient(135deg, rgba(15, 107, 93, 0.96), rgba(8, 72, 63, 0.96));
+            color: #f8f5ef;
+            border-radius: 28px;
+            padding: 28px;
+            box-shadow: var(--shadow);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::after {
+            content: "";
+            position: absolute;
+            inset: auto -40px -60px auto;
+            width: 220px;
+            height: 220px;
+            border-radius: 999px;
+            background: rgba(255, 250, 240, 0.08);
+        }
+
+        .hero h1 {
+            margin: 0 0 8px;
+            font-size: clamp(2rem, 4vw, 3.2rem);
+            line-height: 0.98;
+        }
+
+        .hero p {
+            margin: 0;
+            max-width: 700px;
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+
+        .safety-strip {
+            display: grid;
+            gap: 10px;
+            margin-top: 18px;
+        }
+
+        .safety-pill {
+            display: inline-block;
+            width: fit-content;
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: rgba(255, 250, 240, 0.12);
+            border: 1px solid rgba(255, 250, 240, 0.18);
+            font-size: 0.92rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 18px;
+            margin-top: 22px;
+        }
+
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            padding: 20px;
+            box-shadow: var(--shadow);
+        }
+
+        .card h2 {
+            margin: 0 0 8px;
+            font-size: 1.3rem;
+        }
+
+        .card p.section-copy {
+            margin: 0 0 16px;
+            color: var(--muted);
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .field-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .field label,
+        .checkbox-group legend {
+            font-size: 0.9rem;
+            color: var(--muted);
+        }
+
+        .field input,
+        .field select {
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 11px 12px;
+            background: #fffdf7;
+            color: var(--text);
+            font-size: 0.98rem;
+        }
+
+        .checkbox-group {
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 12px;
+            background: var(--panel-strong);
+            margin-bottom: 14px;
+        }
+
+        .checkbox-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .checkbox-grid label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.94rem;
+        }
+
+        button {
+            border: 0;
+            border-radius: 999px;
+            padding: 12px 16px;
+            background: var(--accent);
+            color: #f8f5ef;
+            cursor: pointer;
+            font-size: 0.98rem;
+            font-weight: 700;
+            transition: transform 140ms ease, background 140ms ease;
+        }
+
+        button:hover {
+            background: var(--accent-strong);
+            transform: translateY(-1px);
+        }
+
+        .output-wrap {
+            margin-top: 22px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 18px;
+        }
+
+        .output-panel {
+            background: #1f241f;
+            color: #eef4e9;
+            border-radius: 22px;
+            padding: 18px;
+            box-shadow: var(--shadow);
+        }
+
+        .output-panel h2 {
+            margin-top: 0;
+            margin-bottom: 8px;
+            color: #f7f0dd;
+        }
+
+        .output-panel p {
+            margin-top: 0;
+            color: #bec8b8;
+        }
+
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        .status-line {
+            min-height: 1.4em;
+            margin-bottom: 12px;
+            color: #f2d7a6;
+        }
+
+        .subtle {
+            color: var(--warning);
+            font-size: 0.9rem;
+            margin-top: 10px;
+        }
+
+        @media (max-width: 720px) {
+            .field-grid,
+            .checkbox-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .shell {
+                width: min(100% - 20px, 1000px);
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="chat-container">
-        <h2 class="text-center mb-4">Trading AI Interface</h2>
-        <div class="chat-box" id="chat-box">
-            <div class="message bot-message">
-                <div class="card card-body">Hello! I am your AI Analyst. Ask me for a forecast. For example: "What's the outlook for NVDA?"</div>
+    <main class="shell">
+        <section class="hero">
+            <h1>Trading AI Dashboard</h1>
+            <p>Run paper-trading workflows, review simulated positions, and generate deterministic system reports from the same FastAPI runtime. The page uses existing API routes only and keeps SQLite as the source of truth.</p>
+            <div class="safety-strip">
+                <span class="safety-pill">Paper trading only</span>
+                <span class="safety-pill">No live brokerage execution</span>
+                <span class="safety-pill">Reports summarize system outputs and are not financial advice</span>
             </div>
-        </div>
-        <form id="chat-form" class="mt-3">
-            <div class="input-group">
-                <input type="text" id="user-input" class="form-control" placeholder="Ask a question..." required>
-                <button class="btn btn-primary" type="submit" id="send-button">Send</button>
-            </div>
-        </form>
-    </div>
+        </section>
 
-<script>
-    const chatForm = document.getElementById('chat-form');
-    const userInput = document.getElementById('user-input');
-    const chatBox = document.getElementById('chat-box');
+        <section class="grid">
+            <article class="card">
+                <h2>Health / Status</h2>
+                <p class="section-copy">Confirm the API is reachable before running cycles or reports.</p>
+                <button type="button" id="check-health-button">Check health</button>
+            </article>
 
-    chatForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const question = userInput.value;
-        if (!question.trim()) return;
+            <article class="card">
+                <h2>Diagnostics</h2>
+                <p class="section-copy">Check local readiness and live provider availability before running real paper-trading dry runs.</p>
+                <div class="field">
+                    <label for="diagnostics-ticker">Dry-run ticker</label>
+                    <input id="diagnostics-ticker" type="text" value="AAPL">
+                </div>
+                <fieldset class="checkbox-group">
+                    <legend>Live dry-run settings</legend>
+                    <div class="checkbox-grid">
+                        <label><input id="diagnostics-include-market-data" type="checkbox" checked> Market data</label>
+                        <label><input id="diagnostics-include-news" type="checkbox" checked> News</label>
+                        <label><input id="diagnostics-include-sec-filings" type="checkbox" checked> SEC filings</label>
+                        <label><input id="diagnostics-include-earnings-transcripts" type="checkbox" checked> Earnings transcripts</label>
+                        <label><input id="diagnostics-include-options" type="checkbox" checked> Options</label>
+                        <label><input id="diagnostics-include-memory" type="checkbox"> Memory</label>
+                    </div>
+                </fieldset>
+                <div class="subtle">Dry run only. No trades are placed. Provider calls may use live API quotas.</div>
+                <button type="button" id="environment-check-button">Environment Check</button>
+                <button type="button" id="live-dry-run-button">Run Live Provider Dry Run</button>
+            </article>
 
-        addMessage(question, 'user');
-        userInput.value = '';
-        
-        const thinkingIndicator = addMessage('<div class="spinner-border text-secondary" role="status"></div>', 'bot');
+            <article class="card">
+                <h2>Weekly Paper Cycle</h2>
+                <p class="section-copy">Run a simulated weekly trade cycle with the current deterministic rules.</p>
+                <div class="field-grid">
+                    <div class="field">
+                        <label for="cycle-universe">Universe</label>
+                        <input id="cycle-universe" type="text" value="large_cap">
+                    </div>
+                    <div class="field">
+                        <label for="cycle-max-tickers">Max tickers</label>
+                        <input id="cycle-max-tickers" type="number" value="500">
+                    </div>
+                    <div class="field">
+                        <label for="cycle-max-trades">Max trades</label>
+                        <input id="cycle-max-trades" type="number" value="5">
+                    </div>
+                    <div class="field">
+                        <label for="cycle-min-trades">Min trades</label>
+                        <input id="cycle-min-trades" type="number" value="2">
+                    </div>
+                    <div class="field">
+                        <label for="cycle-account-size">Account size</label>
+                        <input id="cycle-account-size" type="number" value="10000">
+                    </div>
+                    <div class="field">
+                        <label for="cycle-risk-mode">Risk mode</label>
+                        <input id="cycle-risk-mode" type="text" value="normal">
+                    </div>
+                </div>
+                <fieldset class="checkbox-group">
+                    <legend>Cycle settings</legend>
+                    <div class="checkbox-grid">
+                        <label><input id="cycle-include-options" type="checkbox"> Include options</label>
+                        <label><input id="cycle-prefer-options" type="checkbox"> Prefer options</label>
+                        <label><input id="cycle-include-market-regime" type="checkbox" checked> Include market regime</label>
+                        <label><input id="cycle-include-relative-strength" type="checkbox" checked> Include relative strength</label>
+                        <label><input id="cycle-include-portfolio-risk" type="checkbox" checked> Include portfolio risk</label>
+                        <label><input id="cycle-include-position-sizing" type="checkbox" checked> Include position sizing</label>
+                        <label><input id="cycle-include-memory-context" type="checkbox" checked> Include memory context</label>
+                        <label><input id="cycle-store-memory" type="checkbox"> Store memory</label>
+                    </div>
+                </fieldset>
+                <button type="button" id="run-paper-cycle-button">Run Paper Cycle</button>
+            </article>
 
-        try {
-            // Call our new "/ask" endpoint with the full question
-            const response = await fetch('/ask', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question: question })
+            <article class="card">
+                <h2>Paper Review</h2>
+                <p class="section-copy">Refresh paper outcomes and optionally attach deterministic trade reviews.</p>
+                <fieldset class="checkbox-group">
+                    <legend>Review settings</legend>
+                    <div class="checkbox-grid">
+                        <label><input id="review-update-outcomes" type="checkbox" checked> Update outcomes</label>
+                        <label><input id="review-include-trade-reviews" type="checkbox" checked> Include trade reviews</label>
+                        <label><input id="review-store-review-memory" type="checkbox"> Store review memory</label>
+                    </div>
+                </fieldset>
+                <button type="button" id="review-paper-portfolio-button">Review Paper Portfolio</button>
+            </article>
+
+            <article class="card">
+                <h2>Reports</h2>
+                <p class="section-copy">Generate reusable summaries from SQLite-backed system outputs.</p>
+                <div class="field-grid">
+                    <div class="field">
+                        <label for="report-type">Report type</label>
+                        <select id="report-type">
+                            <option value="full_paper_trading">full_paper_trading</option>
+                            <option value="performance">performance</option>
+                            <option value="post_trade_review">post_trade_review</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="report-format">Format</label>
+                        <select id="report-format">
+                            <option value="markdown">markdown</option>
+                            <option value="dict">dict</option>
+                        </select>
+                    </div>
+                </div>
+                <button type="button" id="generate-report-button">Generate Report</button>
+            </article>
+
+            <article class="card">
+                <h2>Ticker Research</h2>
+                <p class="section-copy">Review one ticker through the existing research and decision path.</p>
+                <div class="field">
+                    <label for="research-ticker">Ticker</label>
+                    <input id="research-ticker" type="text" value="AAPL">
+                </div>
+                <fieldset class="checkbox-group">
+                    <legend>Research settings</legend>
+                    <div class="checkbox-grid">
+                        <label><input id="research-include-options" type="checkbox"> Include options</label>
+                        <label><input id="research-include-sec-filings" type="checkbox" checked> Include SEC filings</label>
+                        <label><input id="research-include-earnings-transcripts" type="checkbox" checked> Include earnings transcripts</label>
+                        <label><input id="research-include-memory-context" type="checkbox" checked> Include memory context</label>
+                    </div>
+                </fieldset>
+                <div class="subtle">Ticker research uses the existing review route and keeps all output in paper/research mode only.</div>
+                <button type="button" id="generate-research-brief-button">Generate Research Brief</button>
+            </article>
+        </section>
+
+        <section class="output-wrap">
+            <article class="output-panel">
+                <h2>Output Panel</h2>
+                <p>JSON responses appear below. If a markdown report is returned, the raw markdown is shown safely in a code block.</p>
+                <div class="status-line" id="status-line">Ready.</div>
+                <pre id="json-output">{}</pre>
+            </article>
+            <article class="output-panel">
+                <h2>Markdown Output</h2>
+                <p>Rendered safely as plain text only.</p>
+                <pre id="markdown-output">No markdown output yet.</pre>
+            </article>
+        </section>
+    </main>
+
+    <script>
+        const jsonOutput = document.getElementById("json-output");
+        const markdownOutput = document.getElementById("markdown-output");
+        const statusLine = document.getElementById("status-line");
+
+        function setStatus(message) {
+            statusLine.textContent = message;
+        }
+
+        function renderResponse(payload) {
+            jsonOutput.textContent = JSON.stringify(payload, null, 2);
+            const markdown = payload?.data?.markdown || payload?.markdown || "";
+            markdownOutput.textContent = markdown || "No markdown output yet.";
+            setStatus(payload?.ok ? "Request completed." : `Request failed: ${payload?.error || "Unknown error"}`);
+        }
+
+        async function requestJson(url, options = {}) {
+            setStatus("Running request...");
+            try {
+                const response = await fetch(url, options);
+                const payload = await response.json();
+                renderResponse(payload);
+            } catch (error) {
+                const payload = {
+                    ok: false,
+                    error: `Request failed: ${error.message}`,
+                };
+                renderResponse(payload);
+            }
+        }
+
+        function value(id) {
+            return document.getElementById(id).value;
+        }
+
+        function checked(id) {
+            return document.getElementById(id).checked;
+        }
+
+        document.getElementById("check-health-button").addEventListener("click", async () => {
+            await requestJson("/health");
+        });
+
+        document.getElementById("environment-check-button").addEventListener("click", async () => {
+            await requestJson("/diagnostics/environment");
+        });
+
+        document.getElementById("live-dry-run-button").addEventListener("click", async () => {
+            const ticker = value("diagnostics-ticker").trim().toUpperCase() || "AAPL";
+            const payload = {
+                ticker,
+                include_market_data: checked("diagnostics-include-market-data"),
+                include_news: checked("diagnostics-include-news"),
+                include_sec_filings: checked("diagnostics-include-sec-filings"),
+                include_earnings_transcripts: checked("diagnostics-include-earnings-transcripts"),
+                include_options: checked("diagnostics-include-options"),
+                include_memory: checked("diagnostics-include-memory")
+            };
+            await requestJson("/diagnostics/live-dry-run", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
             });
+        });
 
-            const data = await response.json();
-            
-            // Use the "marked" library to render the AI's Markdown response
-            const botResponse = marked.parse(data.answer);
-            thinkingIndicator.querySelector('.card-body').innerHTML = botResponse;
+        document.getElementById("run-paper-cycle-button").addEventListener("click", async () => {
+            const payload = {
+                universe: value("cycle-universe"),
+                max_tickers: Number(value("cycle-max-tickers")),
+                max_trades: Number(value("cycle-max-trades")),
+                min_trades: Number(value("cycle-min-trades")),
+                account_size: Number(value("cycle-account-size")),
+                risk_mode: value("cycle-risk-mode"),
+                include_options: checked("cycle-include-options"),
+                prefer_options: checked("cycle-prefer-options"),
+                include_market_regime: checked("cycle-include-market-regime"),
+                include_relative_strength: checked("cycle-include-relative-strength"),
+                include_portfolio_risk: checked("cycle-include-portfolio-risk"),
+                include_position_sizing: checked("cycle-include-position-sizing"),
+                include_memory_context: checked("cycle-include-memory-context"),
+                store_memory: checked("cycle-store-memory")
+            };
+            await requestJson("/paper/cycle", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+        });
 
-        } catch (error) {
-            thinkingIndicator.querySelector('.card-body').innerHTML = '<p class="text-danger">Error connecting to the API server.</p>';
-        }
-    });
+        document.getElementById("review-paper-portfolio-button").addEventListener("click", async () => {
+            const payload = {
+                update_outcomes: checked("review-update-outcomes"),
+                include_trade_reviews: checked("review-include-trade-reviews"),
+                store_review_memory: checked("review-store-review-memory")
+            };
+            await requestJson("/paper/review", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+        });
 
-    function addMessage(text, sender) {
-        const messageDiv = document.createElement('div');
-        messageDiv.className = `message ${sender}-message`;
-        const cardDiv = document.createElement('div');
-        cardDiv.className = 'card card-body';
-        if (sender === 'user') {
-            cardDiv.textContent = text;
-        } else {
-            cardDiv.innerHTML = text;
-        }
-        messageDiv.appendChild(cardDiv);
-        chatBox.appendChild(messageDiv);
-        chatBox.scrollTop = chatBox.scrollHeight;
-        return messageDiv;
-    }
-</script>
+        document.getElementById("generate-report-button").addEventListener("click", async () => {
+            const payload = {
+                report_type: value("report-type"),
+                payload: {},
+                format: value("report-format")
+            };
+            await requestJson("/reports/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+        });
+
+        document.getElementById("generate-research-brief-button").addEventListener("click", async () => {
+            const ticker = value("research-ticker").trim().toUpperCase();
+            if (!ticker) {
+                renderResponse({ ok: false, error: "Ticker is required." });
+                return;
+            }
+            const params = new URLSearchParams({
+                include_catalysts: "true",
+                include_research_brief: "true",
+                include_sec_filings: String(checked("research-include-sec-filings")),
+                include_earnings_transcripts: String(checked("research-include-earnings-transcripts")),
+                include_options: String(checked("research-include-options")),
+                include_memory_context: String(checked("research-include-memory-context"))
+            });
+            await requestJson(`/brain/review-ticker/${encodeURIComponent(ticker)}?${params.toString()}`);
+        });
+    </script>
 </body>
 </html>

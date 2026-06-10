@@ -14,6 +14,13 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
 FMP_API_KEY = os.getenv("FMP_API_KEY")
+MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "polygon")
+OPTIONS_DATA_PROVIDER = os.getenv("OPTIONS_DATA_PROVIDER", "polygon")
+IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
+IBKR_PORT = os.getenv("IBKR_PORT", "7496")
+IBKR_CLIENT_ID = os.getenv("IBKR_CLIENT_ID", "123")
+IBKR_READ_ONLY = os.getenv("IBKR_READ_ONLY", "true")
+IBKR_USE_DELAYED_DATA = os.getenv("IBKR_USE_DELAYED_DATA", "true")
 
 # ==============================================================================
 # -- TRADING & DATA PARAMETERS --

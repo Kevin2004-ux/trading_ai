@@ -1,0 +1,507 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any
+
+from realtime.market_data import get_market_snapshot
+from scanner.universe_builder import get_default_universe
+
+
+DEFAULT_BREADTH_SAMPLE_SIZE = 30
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _snapshot_technical(snapshot: dict | None) -> dict:
+    if not isinstance(snapshot, dict):
+        return {}
+    data = snapshot.get("data", {})
+    if isinstance(data, dict):
+        technical = data.get("technical_snapshot", {})
+        if isinstance(technical, dict):
+            return technical
+    technical = snapshot.get("technical_snapshot", {})
+    return technical if isinstance(technical, dict) else {}
+
+
+def _current_price(snapshot: dict | None) -> float | None:
+    technical = _snapshot_technical(snapshot)
+    price = _safe_float(technical.get("current_price"))
+    if price is not None:
+        return price
+    if isinstance(snapshot, dict):
+        data = snapshot.get("data", {})
+        if isinstance(data, dict):
+            quote = data.get("quote", {})
+            if isinstance(quote, dict):
+                return _safe_float(quote.get("last_price"))
+    return None
+
+
+def analyze_index_trend(
+    ticker: str,
+    market_snapshot: dict,
+) -> dict:
+    technical = _snapshot_technical(market_snapshot)
+    current_price = _safe_float(technical.get("current_price"))
+    sma_20 = _safe_float(technical.get("sma_20"))
+    sma_50 = _safe_float(technical.get("sma_50"))
+    sma_200 = _safe_float(technical.get("sma_200"))
+    distance_from_20_sma = _safe_float(technical.get("distance_from_20_sma"))
+    distance_from_50_sma = _safe_float(technical.get("distance_from_50_sma"))
+    atr_percent = _safe_float(technical.get("atr_percent"))
+
+    if current_price is None:
+        return {
+            "ok": False,
+            "ticker": ticker.upper(),
+            "trend": "unknown",
+            "extended": False,
+            "current_price": None,
+            "sma_20": sma_20,
+            "sma_50": sma_50,
+            "sma_200": sma_200,
+            "distance_from_20_sma": distance_from_20_sma,
+            "distance_from_50_sma": distance_from_50_sma,
+            "atr_percent": atr_percent,
+            "error": "Current price is unavailable.",
+        }
+
+    above_20 = sma_20 is not None and current_price > sma_20
+    above_50 = sma_50 is not None and current_price > sma_50
+    above_200 = sma_200 is not None and current_price > sma_200
+    below_50 = sma_50 is not None and current_price < sma_50
+    below_200 = sma_200 is not None and current_price < sma_200
+
+    extended = False
+    if distance_from_20_sma is not None and distance_from_20_sma >= 6.0:
+        extended = True
+    if atr_percent is not None and atr_percent >= 4.5 and (distance_from_20_sma or 0.0) > 4.0:
+        extended = True
+
+    if above_20 and above_50 and above_200:
+        trend = "bullish"
+    elif above_50 and above_200:
+        trend = "constructive"
+    elif below_50 and below_200:
+        trend = "bearish"
+    else:
+        trend = "mixed"
+
+    return {
+        "ok": True,
+        "ticker": ticker.upper(),
+        "trend": trend,
+        "extended": extended,
+        "current_price": current_price,
+        "sma_20": sma_20,
+        "sma_50": sma_50,
+        "sma_200": sma_200,
+        "distance_from_20_sma": distance_from_20_sma,
+        "distance_from_50_sma": distance_from_50_sma,
+        "atr_percent": atr_percent,
+        "error": None,
+    }
+
+
+def analyze_volatility_regime(
+    vix_snapshot: dict | None = None,
+    spy_snapshot: dict | None = None,
+) -> dict:
+    vix_value = _current_price(vix_snapshot)
+    if vix_value is not None:
+        if vix_value < 16:
+            label = "low"
+        elif vix_value <= 22:
+            label = "normal"
+        elif vix_value <= 30:
+            label = "elevated"
+        else:
+            label = "high"
+        return {
+            "ok": True,
+            "source": "VIX",
+            "volatility_label": label,
+            "vix_value": vix_value,
+            "spy_atr_percent": _safe_float(_snapshot_technical(spy_snapshot).get("atr_percent")),
+            "error": None,
+        }
+
+    spy_atr_percent = _safe_float(_snapshot_technical(spy_snapshot).get("atr_percent"))
+    if spy_atr_percent is None:
+        return {
+            "ok": False,
+            "source": "unknown",
+            "volatility_label": "unknown",
+            "vix_value": None,
+            "spy_atr_percent": None,
+            "error": "VIX and SPY ATR context are unavailable.",
+        }
+
+    if spy_atr_percent < 1.5:
+        label = "low"
+    elif spy_atr_percent <= 2.5:
+        label = "normal"
+    elif spy_atr_percent <= 4.0:
+        label = "elevated"
+    else:
+        label = "high"
+
+    return {
+        "ok": True,
+        "source": "SPY_ATR",
+        "volatility_label": label,
+        "vix_value": None,
+        "spy_atr_percent": spy_atr_percent,
+        "error": None,
+    }
+
+
+def analyze_market_breadth(
+    universe_snapshots: list[dict] | None = None,
+) -> dict:
+    if not isinstance(universe_snapshots, list) or not universe_snapshots:
+        return {
+            "ok": True,
+            "sample_size": 0,
+            "percent_above_sma_20": None,
+            "percent_above_sma_50": None,
+            "percent_positive_daily_return": None,
+            "percent_relative_volume_1_2": None,
+            "breadth_label": "unknown",
+            "error": None,
+        }
+
+    valid_count = 0
+    above_20 = 0
+    above_50 = 0
+    positive_daily = 0
+    elevated_rvol = 0
+
+    for snapshot in universe_snapshots:
+        technical = _snapshot_technical(snapshot)
+        current_price = _safe_float(technical.get("current_price"))
+        sma_20 = _safe_float(technical.get("sma_20"))
+        sma_50 = _safe_float(technical.get("sma_50"))
+        daily_return = _safe_float(technical.get("daily_return"))
+        relative_volume = _safe_float(technical.get("relative_volume"))
+
+        if current_price is None:
+            continue
+        valid_count += 1
+        if sma_20 is not None and current_price > sma_20:
+            above_20 += 1
+        if sma_50 is not None and current_price > sma_50:
+            above_50 += 1
+        if daily_return is not None and daily_return > 0:
+            positive_daily += 1
+        if relative_volume is not None and relative_volume >= 1.2:
+            elevated_rvol += 1
+
+    if valid_count == 0:
+        return {
+            "ok": True,
+            "sample_size": 0,
+            "percent_above_sma_20": None,
+            "percent_above_sma_50": None,
+            "percent_positive_daily_return": None,
+            "percent_relative_volume_1_2": None,
+            "breadth_label": "unknown",
+            "error": None,
+        }
+
+    percent_above_sma_20 = round((above_20 / valid_count) * 100.0, 2)
+    percent_above_sma_50 = round((above_50 / valid_count) * 100.0, 2)
+    percent_positive_daily_return = round((positive_daily / valid_count) * 100.0, 2)
+    percent_relative_volume_1_2 = round((elevated_rvol / valid_count) * 100.0, 2)
+
+    if percent_above_sma_20 >= 70 and percent_above_sma_50 >= 65:
+        breadth_label = "strong"
+    elif percent_above_sma_20 >= 55 and percent_above_sma_50 >= 50:
+        breadth_label = "healthy"
+    elif percent_above_sma_20 < 35 and percent_above_sma_50 < 35:
+        breadth_label = "weak"
+    else:
+        breadth_label = "mixed"
+
+    return {
+        "ok": True,
+        "sample_size": valid_count,
+        "percent_above_sma_20": percent_above_sma_20,
+        "percent_above_sma_50": percent_above_sma_50,
+        "percent_positive_daily_return": percent_positive_daily_return,
+        "percent_relative_volume_1_2": percent_relative_volume_1_2,
+        "breadth_label": breadth_label,
+        "error": None,
+    }
+
+
+def determine_market_regime(
+    spy_snapshot: dict | None = None,
+    qqq_snapshot: dict | None = None,
+    iwm_snapshot: dict | None = None,
+    vix_snapshot: dict | None = None,
+    universe_snapshots: list[dict] | None = None,
+) -> dict:
+    timestamp = _now_iso()
+    spy_context = analyze_index_trend("SPY", spy_snapshot or {})
+    qqq_context = analyze_index_trend("QQQ", qqq_snapshot or {})
+    iwm_context = analyze_index_trend("IWM", iwm_snapshot or {})
+    vix_context = analyze_volatility_regime(vix_snapshot=vix_snapshot, spy_snapshot=spy_snapshot)
+    breadth_context = analyze_market_breadth(universe_snapshots=universe_snapshots)
+
+    index_context = {
+        "SPY": spy_context,
+        "QQQ": qqq_context,
+        "IWM": iwm_context,
+        "VIX": vix_context,
+    }
+
+    valid_indexes = [context for context in (spy_context, qqq_context, iwm_context) if context.get("ok")]
+    if not valid_indexes and not vix_context.get("ok"):
+        return {
+            "ok": True,
+            "timestamp": timestamp,
+            "regime": "unknown",
+            "confidence_label": "low",
+            "trade_aggressiveness": "normal",
+            "max_trades_adjustment": 0,
+            "long_bias": False,
+            "short_bias": False,
+            "options_aggressiveness": "normal",
+            "index_context": index_context,
+            "breadth_context": breadth_context,
+            "risk_flags": ["Insufficient market data for regime analysis."],
+            "summary": "Market regime is unknown because index and volatility context are unavailable.",
+        }
+
+    bullish_count = sum(1 for context in valid_indexes if context.get("trend") == "bullish")
+    constructive_count = sum(1 for context in valid_indexes if context.get("trend") == "constructive")
+    bearish_count = sum(1 for context in valid_indexes if context.get("trend") == "bearish")
+    mixed_count = sum(1 for context in valid_indexes if context.get("trend") == "mixed")
+    extended_count = sum(1 for context in valid_indexes if context.get("extended"))
+    volatility_label = vix_context.get("volatility_label", "unknown")
+    breadth_label = breadth_context.get("breadth_label", "unknown")
+
+    regime = "mixed"
+    if volatility_label == "high":
+        regime = "high_volatility"
+    elif bearish_count >= 2:
+        regime = "risk_off_downtrend"
+    elif bullish_count >= 2 and extended_count >= 2:
+        regime = "risk_on_extended"
+    elif bullish_count >= 2 and bearish_count == 0:
+        regime = "risk_on_uptrend"
+    elif mixed_count >= 1 and bullish_count <= 1 and bearish_count <= 1:
+        regime = "neutral_chop"
+    elif bullish_count == 0 and bearish_count == 0 and constructive_count >= 2:
+        regime = "neutral_chop"
+
+    risk_flags: list[str] = []
+    if volatility_label == "elevated":
+        risk_flags.append("Volatility is elevated.")
+    if volatility_label == "high":
+        risk_flags.append("Volatility is high. Reduce aggressiveness.")
+    if extended_count >= 2:
+        risk_flags.append("Major indexes are extended above short-term trend.")
+    if breadth_label == "weak":
+        risk_flags.append("Market breadth is weak.")
+    elif breadth_label == "mixed":
+        risk_flags.append("Market breadth is mixed.")
+    if bearish_count >= 2:
+        risk_flags.append("Multiple major indexes are below key moving averages.")
+
+    if regime == "risk_on_uptrend":
+        confidence_label = "high" if breadth_label in {"healthy", "strong"} else "medium"
+        trade_aggressiveness = "high" if volatility_label == "low" and breadth_label == "strong" else "normal"
+        max_trades_adjustment = 1
+        long_bias = True
+        short_bias = False
+        options_aggressiveness = "aggressive" if volatility_label == "low" else "normal"
+    elif regime == "risk_on_extended":
+        confidence_label = "medium"
+        trade_aggressiveness = "low"
+        max_trades_adjustment = -1
+        long_bias = True
+        short_bias = False
+        options_aggressiveness = "conservative"
+    elif regime == "neutral_chop":
+        confidence_label = "medium" if valid_indexes else "low"
+        trade_aggressiveness = "low"
+        max_trades_adjustment = -2
+        long_bias = False
+        short_bias = False
+        options_aggressiveness = "conservative"
+    elif regime == "risk_off_downtrend":
+        confidence_label = "high" if bearish_count >= 3 else "medium"
+        trade_aggressiveness = "none"
+        max_trades_adjustment = -5
+        long_bias = False
+        short_bias = True
+        options_aggressiveness = "avoid"
+    elif regime == "high_volatility":
+        confidence_label = "high"
+        trade_aggressiveness = "none"
+        max_trades_adjustment = -5
+        long_bias = False
+        short_bias = False
+        options_aggressiveness = "avoid"
+    elif regime == "mixed":
+        confidence_label = "low" if breadth_label == "unknown" else "medium"
+        trade_aggressiveness = "low"
+        max_trades_adjustment = -1
+        long_bias = False
+        short_bias = False
+        options_aggressiveness = "conservative"
+    else:
+        confidence_label = "low"
+        trade_aggressiveness = "normal"
+        max_trades_adjustment = 0
+        long_bias = False
+        short_bias = False
+        options_aggressiveness = "normal"
+
+    summary = (
+        f"Market regime is {regime.replace('_', ' ')} with {confidence_label} confidence. "
+        f"Volatility is {volatility_label}, breadth is {breadth_label}, and trade aggressiveness is {trade_aggressiveness}."
+    )
+
+    return {
+        "ok": True,
+        "timestamp": timestamp,
+        "regime": regime,
+        "confidence_label": confidence_label,
+        "trade_aggressiveness": trade_aggressiveness,
+        "max_trades_adjustment": max_trades_adjustment,
+        "long_bias": long_bias,
+        "short_bias": short_bias,
+        "options_aggressiveness": options_aggressiveness,
+        "index_context": index_context,
+        "breadth_context": breadth_context,
+        "risk_flags": risk_flags,
+        "summary": summary,
+    }
+
+
+def get_market_regime_snapshot(
+    include_breadth: bool = False,
+    db_path: str = "strategy_library.db",
+) -> dict:
+    del db_path
+
+    spy_snapshot = get_market_snapshot("SPY", lookback_days=250)
+    qqq_snapshot = get_market_snapshot("QQQ", lookback_days=250)
+    iwm_snapshot = get_market_snapshot("IWM", lookback_days=250)
+    vix_snapshot = get_market_snapshot("VIX", lookback_days=120)
+
+    breadth_snapshots: list[dict] | None = None
+    if include_breadth:
+        universe_result = get_default_universe(universe="large_cap", max_tickers=DEFAULT_BREADTH_SAMPLE_SIZE)
+        if isinstance(universe_result, dict) and universe_result.get("ok"):
+            breadth_snapshots = []
+            for ticker in universe_result.get("tickers", [])[:DEFAULT_BREADTH_SAMPLE_SIZE]:
+                snapshot = get_market_snapshot(ticker, lookback_days=120)
+                if isinstance(snapshot, dict):
+                    breadth_snapshots.append(snapshot)
+
+    regime_result = determine_market_regime(
+        spy_snapshot=spy_snapshot if spy_snapshot.get("ok") else None,
+        qqq_snapshot=qqq_snapshot if qqq_snapshot.get("ok") else None,
+        iwm_snapshot=iwm_snapshot if iwm_snapshot.get("ok") else None,
+        vix_snapshot=vix_snapshot if vix_snapshot.get("ok") else None,
+        universe_snapshots=breadth_snapshots,
+    )
+    regime_result["include_breadth"] = include_breadth
+    regime_result["snapshots_requested"] = ["SPY", "QQQ", "IWM", "VIX"]
+    return regime_result
+
+
+def apply_regime_to_trade_selection(
+    selection_result: dict,
+    regime_result: dict,
+    config: dict | None = None,
+) -> dict:
+    del config
+
+    adjusted = deepcopy(selection_result) if isinstance(selection_result, dict) else {}
+    if not adjusted.get("ok") or not isinstance(regime_result, dict) or not regime_result.get("ok"):
+        return adjusted
+
+    selected_trades = adjusted.get("selected_trades", [])
+    if not isinstance(selected_trades, list):
+        selected_trades = []
+    watchlist = adjusted.get("watchlist_alternatives", [])
+    if not isinstance(watchlist, list):
+        watchlist = []
+
+    regime = str(regime_result.get("regime", "unknown")).lower()
+    trade_aggressiveness = str(regime_result.get("trade_aggressiveness", "none")).lower()
+    options_aggressiveness = str(regime_result.get("options_aggressiveness", "avoid")).lower()
+    risk_flags = [str(flag) for flag in regime_result.get("risk_flags", []) if flag]
+    selection_summary = adjusted.get("selection_summary", {})
+    if not isinstance(selection_summary, dict):
+        selection_summary = {}
+
+    original_selected = list(selection_result.get("selected_trades", [])) if isinstance(selection_result, dict) and isinstance(selection_result.get("selected_trades"), list) else []
+    original_max = int(selection_summary.get("max_trades", len(selected_trades) or 0) or 0)
+    capped_max = max(0, original_max + int(regime_result.get("max_trades_adjustment", 0) or 0))
+    if regime in {"risk_off_downtrend", "high_volatility"}:
+        capped_max = min(capped_max, 1)
+        if trade_aggressiveness == "none":
+            capped_max = 0
+    elif regime == "neutral_chop":
+        capped_max = min(capped_max, 2) if capped_max > 0 else 0
+    elif regime == "risk_on_extended":
+        capped_max = min(capped_max, 3) if capped_max > 0 else 0
+
+    trimmed = selected_trades[capped_max:] if capped_max < len(selected_trades) else []
+    selected_trades = selected_trades[:capped_max]
+
+    for trade in selected_trades:
+        if not isinstance(trade, dict):
+            continue
+        trade.setdefault("regime_risk_flags", [])
+        if isinstance(trade["regime_risk_flags"], list):
+            trade["regime_risk_flags"].extend(risk_flags)
+        trade["market_regime"] = regime_result
+        trade["options_aggressiveness"] = options_aggressiveness
+
+    for trade in trimmed:
+        if not isinstance(trade, dict):
+            continue
+        trade["regime_removed"] = True
+        trade["regime_removed_reason"] = f"Removed by market regime filter: {regime}."
+    watchlist = trimmed + watchlist
+
+    adjusted["selected_trades"] = selected_trades
+    adjusted["watchlist_alternatives"] = watchlist
+    adjusted["market_regime"] = regime_result
+    adjusted["regime_adjustment"] = {
+        "original_selected_count": len(original_selected),
+        "adjusted_selected_count": len(selected_trades),
+        "capped_max_trades": capped_max,
+        "trade_aggressiveness": trade_aggressiveness,
+        "options_aggressiveness": options_aggressiveness,
+    }
+    selection_summary["selected_count"] = len(selected_trades)
+    selection_summary["watchlist_count"] = len(watchlist)
+    prior_message = selection_summary.get("message", "")
+    selection_summary["message"] = (
+        f"{prior_message} Regime filter applied: {regime_result.get('summary')}".strip()
+        if prior_message
+        else f"Regime filter applied: {regime_result.get('summary')}"
+    )
+    adjusted["selection_summary"] = selection_summary
+    return adjusted

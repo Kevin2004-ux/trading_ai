@@ -1,5 +1,6 @@
 # Environment files
 .env
+/.venv/
 /venv/
 /trading_env/
 
