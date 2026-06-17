@@ -55,18 +55,51 @@ These keys are optional for startup, but some routes and tools use them when ava
 - `PINECONE_ENVIRONMENT`
   - Optional companion setting for Pinecone.
 
-Example `.env`:
+Start from the safe template:
+
+```bash
+cp .env.example .env
+```
+
+Safe local `.env` shape:
 
 ```env
-GEMINI_API_KEY=your_key_here
-POLYGON_API_KEY=your_key_here
-FMP_API_KEY=your_key_here
-PINECONE_API_KEY=your_key_here
-PINECONE_INDEX_NAME=trading-ai-memory
-PINECONE_NAMESPACE=trading_ai
-MEMORY_EMBEDDING_PROVIDER=your_provider_here
-PINECONE_ENVIRONMENT=your_env_here
+MARKET_DATA_PROVIDER=ibkr
+OPTIONS_DATA_PROVIDER=ibkr
+IBKR_HOST=127.0.0.1
+IBKR_PORT=7496
+IBKR_CLIENT_ID=123
+IBKR_READ_ONLY=true
+MARKET_DATA_MODE=auto
+ALLOW_HISTORICAL_BAR_FALLBACK=true
+ALLOW_LIVE_QUOTE_REQUIRED=false
+ALLOW_OPTIONS_WITHOUT_QUOTES=false
+GEMINI_API_KEY=
+POLYGON_API_KEY=
+FMP_API_KEY=
+PINECONE_API_KEY=
+PINECONE_INDEX_NAME=
+SEC_USER_AGENT="TradingAI Your Name email@example.com"
 ```
+
+Optional scheduler and local alert settings:
+
+```env
+SCHEDULER_ENABLED=false
+SCHEDULER_TIMEZONE=America/New_York
+SCHEDULER_MARKET_DAYS_ONLY=true
+DEFAULT_PAPER_SCAN_DAY=MON
+DEFAULT_PAPER_SCAN_TIME=09:00
+DEFAULT_HEALTHCHECK_TIME=08:30
+ALERTS_ENABLED=true
+ALERT_CHANNELS=local
+ALERT_MIN_SEVERITY=warning
+ALERT_WEBHOOK_URL=
+ALERT_EMAIL_ENABLED=false
+```
+
+Alerts are structured SQLite events by default. Webhook and email channels are intentionally
+configured-not-sent unless a future project-specific sender is explicitly added and tested.
 
 Missing keys should not crash startup:
 
@@ -116,10 +149,22 @@ Run the focused report suite:
 python -m pytest tests/test_report_generator.py -q
 ```
 
+Run the focused scheduled-jobs and alerts suites:
+
+```bash
+python -m pytest tests/test_job_registry.py tests/test_scheduler.py tests/test_job_history.py tests/test_job_runner.py tests/test_alert_channels.py tests/test_alert_manager.py tests/test_alert_rules.py -q
+```
+
+Run the focused macro/regime risk suites:
+
+```bash
+python -m pytest tests/test_macro_calendar.py tests/test_macro_risk.py tests/test_market_regime_granularity.py -q
+```
+
 Run the full offline suite:
 
 ```bash
-python -m pytest tests/test_trade_logger.py tests/test_market_data.py tests/test_constraint_engine.py tests/test_swing_scanner.py tests/test_outcome_grader.py tests/test_agent_tools.py tests/test_scan_profiles.py tests/test_statistical_brain.py tests/test_universe_builder.py tests/test_weekly_selector.py tests/test_catalyst_enrichment.py tests/test_translator.py tests/test_agent_workflow.py tests/test_trading_brain.py tests/test_paper_trader.py tests/test_paper_jobs.py tests/test_cli.py tests/test_ui_routes.py tests/test_options_chain.py tests/test_options_scanner.py tests/test_options_mispricing.py tests/test_market_regime.py tests/test_relative_strength.py tests/test_deep_research.py tests/test_sec_filings.py tests/test_earnings_transcripts.py tests/test_portfolio_manager.py tests/test_position_sizing.py tests/test_vector_memory.py tests/test_trade_journal.py tests/test_report_generator.py tests/test_healthcheck.py tests/test_live_dry_run.py -q
+python -m pytest tests/test_trade_logger.py tests/test_market_data.py tests/test_constraint_engine.py tests/test_swing_scanner.py tests/test_outcome_grader.py tests/test_agent_tools.py tests/test_scan_profiles.py tests/test_statistical_brain.py tests/test_universe_builder.py tests/test_weekly_selector.py tests/test_catalyst_enrichment.py tests/test_translator.py tests/test_agent_workflow.py tests/test_trading_brain.py tests/test_paper_trader.py tests/test_paper_jobs.py tests/test_cli.py tests/test_ui_routes.py tests/test_options_chain.py tests/test_options_scanner.py tests/test_options_mispricing.py tests/test_market_regime.py tests/test_relative_strength.py tests/test_deep_research.py tests/test_sec_filings.py tests/test_earnings_transcripts.py tests/test_portfolio_manager.py tests/test_position_sizing.py tests/test_vector_memory.py tests/test_trade_journal.py tests/test_report_generator.py tests/test_healthcheck.py tests/test_live_dry_run.py tests/test_job_registry.py tests/test_scheduler.py tests/test_job_history.py tests/test_job_runner.py tests/test_alert_channels.py tests/test_alert_manager.py tests/test_alert_rules.py -q
 ```
 
 ## 6. Start the FastAPI App
@@ -201,14 +246,61 @@ python cli.py live-dry-run --ticker AAPL --pretty
 python cli.py ibkr-diagnose --ticker AAPL --pretty
 ```
 
-Run a simulated paper cycle with the current deterministic research stack enabled:
+Manual live-readiness checklist when TWS is open:
 
 ```bash
-python cli.py paper-cycle --universe large_cap --include-options --include-market-regime --include-relative-strength --include-portfolio-risk --include-position-sizing --pretty
+.venv/bin/python cli.py ibkr-diagnose --ticker AAPL --pretty
+.venv/bin/python cli.py ibkr-diagnose --ticker SPY --pretty
+.venv/bin/python cli.py ibkr-options-diagnose --ticker AAPL --pretty
+```
+
+Expected current behavior:
+
+- Stock quotes and historical bars should work when TWS is open and permissions are available.
+- Options metadata may work.
+- Options quotes may remain unavailable without OPRA/options quote permissions.
+- Final option recommendations stay blocked unless every option quote, IV, Greeks, risk, and fill gate passes.
+
+Run a stock-only simulated paper cycle:
+
+```bash
+python cli.py paper-cycle \
+  --universe mega_cap \
+  --max-tickers 25 \
+  --max-trades 2 \
+  --min-trades 0 \
+  --no-include-options \
+  --include-market-regime \
+  --include-relative-strength \
+  --include-portfolio-risk \
+  --include-position-sizing \
+  --pretty
 ```
 
 Paper trades are simulated records only. The app has no brokerage execution route and no CLI
 command that places buy, sell, or order instructions.
+
+### Macro Calendar And Risk Controls
+
+The macro calendar is currently an offline/static risk-control feed. It is used to block or
+reduce new simulated recommendations around major events such as CPI, FOMC, jobs reports, OPEX,
+and earnings clusters. It does not call a live calendar API.
+
+Inspect upcoming events:
+
+```bash
+python cli.py macro-calendar --days 14 --pretty
+```
+
+Evaluate current macro-event risk:
+
+```bash
+python cli.py macro-risk --pretty
+```
+
+Critical active macro windows can block new final recommendations. High/medium windows can reduce
+position sizing through the same deterministic risk multiplier path used by circuit breakers and
+market-regime controls.
 
 ## 8. Example API Calls
 
@@ -458,9 +550,51 @@ Reports are deterministic summaries of structured system outputs. They can summa
 
 The research brief is an evidence summary, not a guaranteed prediction. It can show a strong thesis and still conclude that no final trade qualifies under the hard constraints.
 
-## 9. Scheduling With Cron
+## 11. Scheduled Jobs And Alerts
 
-This repo does not auto-start a scheduler on import. The safest default is to schedule the CLI explicitly with `cron`, GitHub Actions, or another external job runner.
+This repo does not auto-start a scheduler on import. Scheduled jobs are simulated/paper-only and
+must be triggered explicitly through the CLI, `cron`, GitHub Actions, or another external job
+runner. No job places real brokerage orders.
+
+List registered jobs:
+
+```bash
+python cli.py jobs --pretty
+```
+
+Run one registered job in safe dry-run mode:
+
+```bash
+python cli.py job-run --job weekly_paper_cycle --pretty
+```
+
+Run due jobs in safe dry-run mode:
+
+```bash
+python cli.py jobs-due --pretty
+```
+
+View job history:
+
+```bash
+python cli.py job-history --pretty
+```
+
+View local structured alerts:
+
+```bash
+python cli.py alerts --pretty
+```
+
+Create a local test alert without external sends:
+
+```bash
+python cli.py alert-test --severity warning --pretty
+```
+
+The local scheduler helper understands interval, daily, and weekly schedules, but it is not started
+automatically by importing the app. Keep `SCHEDULER_ENABLED=false` unless you have an explicit
+runner process supervising job execution.
 
 Example `cron` entries:
 
@@ -482,7 +616,122 @@ You can also snapshot the current simulated state on demand:
 python cli.py paper-summary --pretty
 ```
 
-## 10. Notes
+Full paper-trading reports include the latest scheduled-job status, recent alert summary, severity
+counts, failed-job count, and paper-cycle job status when those rows exist in SQLite.
+
+## 12. Stress Testing And Scenario Simulation
+
+Stress testing is deterministic and paper-trading-only. It simulates market, data-quality,
+risk-control, and control-plane failures without calling live providers or placing orders.
+
+Useful environment flags:
+
+- `STRESS_TESTING_ENABLED=true`
+- `STRESS_TEST_JOB_ENABLED=false`
+- `STRESS_MAX_ACCEPTABLE_LOSS_R=3.0`
+- `STRESS_BLOCK_ON_EXTREME_DATA_FAILURE=true`
+
+List available scenarios:
+
+```bash
+python cli.py stress-scenarios --pretty
+```
+
+Run one scenario against a sample paper candidate:
+
+```bash
+python cli.py stress-test --scenario market_gap_down --pretty
+```
+
+Run the default stress suite:
+
+```bash
+python cli.py stress-suite --pretty
+```
+
+Stress currently open simulated paper trades in SQLite:
+
+```bash
+python cli.py portfolio-stress --scenario volatility_spike --pretty
+```
+
+Simulate data failures without provider calls:
+
+```bash
+python cli.py data-failure-sim --scenario provider_outage --pretty
+```
+
+The registered `stress_test` job is disabled by default and must be run explicitly:
+
+```bash
+python cli.py job-run --job stress_test --pretty
+```
+
+Stress tests can downgrade or block simulated recommendations, but they never make a rejected
+candidate eligible and never unblock option recommendations.
+
+## 13. Troubleshooting
+
+### TWS Connection Refused
+
+- Confirm Trader Workstation is open.
+- Confirm ActiveX and Socket Clients are enabled.
+- Confirm Read-Only API is enabled.
+- Confirm `IBKR_HOST=127.0.0.1` and `IBKR_PORT=7496` match TWS.
+- Run `.venv/bin/python cli.py ibkr-diagnose --ticker AAPL --pretty`.
+
+### Option Quotes Unavailable
+
+- Option metadata can work even when option quotes fail.
+- IBKR error `10089` usually indicates market-data subscription or permission issues.
+- OPRA/options quote permissions may be required.
+- Final option recommendations should remain blocked until quote, IV, Greeks, DTE, spread, and fill gates pass.
+
+### WMT Historical Timeout
+
+- Treat as a provider/runtime data issue, not a trade signal.
+- Re-run with a smaller universe or lower concurrency if rate limits/timeouts appear.
+- Historical fallback warnings should be preserved in reports and scanner output.
+
+### BRK.B Symbol Issue
+
+- Provider symbol formats differ.
+- IBKR may require class-share normalization such as `BRK B`.
+- Use ticker normalization diagnostics and avoid manually forcing a trade when symbol mapping fails.
+
+### Stale Or Fallback Data Warnings
+
+- Historical-bar fallback may be acceptable for after-close swing scans.
+- It is not suitable for intraday entries or precise option spread work.
+- Candidates with stale/unavailable data should be blocked or downgraded by data-quality gates.
+
+### Macro Critical Block
+
+- Macro risk can block final recommendations around critical events.
+- Run `.venv/bin/python cli.py macro-calendar --days 14 --pretty`.
+- Run `.venv/bin/python cli.py macro-risk --pretty`.
+- Do not override a critical macro block with Gemini narrative.
+
+### Startup Readiness Blocked
+
+- Run `.venv/bin/python cli.py config-check --pretty`.
+- Run `.venv/bin/python cli.py readiness-check --pretty`.
+- Fix blocking errors before running paper cycles.
+- Missing optional API keys are warnings unless a feature is configured as required.
+
+### DB Migration Issue
+
+- Run `.venv/bin/python cli.py db-migrate --pretty`.
+- Run `.venv/bin/python cli.py db-status --pretty`.
+- SQLite database files are local artifacts and should not be committed.
+
+### Audit Chain Issue
+
+- Run `.venv/bin/python cli.py db-status --pretty`.
+- Treat audit-chain failures as critical diagnostics.
+- Do not edit audit rows by hand; investigate the source of corruption or regenerate a clean local test database if appropriate.
+
+## 14. Notes
 
 - `auto_log` defaults to `false` on the weekly trade hunt route.
 - No route places real trades or sends brokerage orders.

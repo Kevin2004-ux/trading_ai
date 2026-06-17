@@ -54,6 +54,60 @@ def _asset_type(trade: dict) -> str:
     return "stock"
 
 
+def _risk_multiplier_config(config: dict | None) -> tuple[dict[str, float], list[str]]:
+    if not isinstance(config, dict):
+        return {}, []
+    raw = config.get("risk_multipliers", {})
+    multipliers: dict[str, float] = {}
+    reasons: list[str] = []
+    if isinstance(raw, dict):
+        for name, value in raw.items():
+            numeric = _safe_float(value)
+            if numeric is None:
+                continue
+            multipliers[str(name)] = max(0.0, min(float(numeric), 1.0))
+    for reason in config.get("risk_multiplier_reasons", []) if isinstance(config.get("risk_multiplier_reasons"), list) else []:
+        reasons.append(str(reason))
+    single = _safe_float(config.get("risk_multiplier"))
+    if single is not None:
+        multipliers.setdefault("manual", max(0.0, min(float(single), 1.0)))
+    return multipliers, reasons
+
+
+def apply_risk_multipliers_to_position_sizing(position_sizing: dict, config: dict | None = None) -> dict:
+    if not isinstance(position_sizing, dict):
+        return position_sizing
+    multipliers, reasons = _risk_multiplier_config(config)
+    if not multipliers:
+        return position_sizing
+    combined = 1.0
+    for value in multipliers.values():
+        combined *= value
+    adjusted = deepcopy(position_sizing)
+    adjusted["original_position_sizing"] = deepcopy(position_sizing)
+    adjusted["risk_multipliers"] = multipliers
+    adjusted["combined_risk_multiplier"] = round(combined, 6)
+    adjusted["risk_multiplier_reasons"] = reasons
+    if adjusted.get("asset_type") == "stock":
+        original_shares = int(adjusted.get("shares") or 0)
+        adjusted["shares"] = max(int(floor(original_shares * combined)), 0)
+        entry = _safe_float(adjusted.get("entry_price")) or 0.0
+        risk_per_share = _safe_float(adjusted.get("risk_per_share")) or 0.0
+        adjusted["notional_exposure"] = adjusted["shares"] * entry
+        adjusted["estimated_max_loss"] = adjusted["shares"] * risk_per_share
+    elif adjusted.get("asset_type") == "option":
+        original_contracts = int(adjusted.get("contracts") or 0)
+        adjusted["contracts"] = max(int(floor(original_contracts * combined)), 0)
+        premium_per_contract = _safe_float(adjusted.get("premium_per_contract")) or 0.0
+        adjusted["notional_contract_exposure"] = adjusted["contracts"] * premium_per_contract
+        adjusted["estimated_max_loss"] = adjusted["notional_contract_exposure"]
+    warnings = adjusted.setdefault("warnings", [])
+    if isinstance(warnings, list):
+        warnings.append(f"Position size adjusted by combined risk multiplier {round(combined, 4)}.")
+        warnings.extend(reasons)
+    return adjusted
+
+
 def get_position_sizing_config(
     account_size: float = 10000.0,
     risk_mode: str = "normal",
@@ -133,7 +187,7 @@ def calculate_stock_position_size(
     if shares < 1:
         warnings.append("Suggested share size is zero because the stop distance is too large for the configured account and risk settings.")
 
-    return {
+    result = {
         "ok": True,
         "asset_type": "stock",
         "ticker": ticker,
@@ -150,6 +204,7 @@ def calculate_stock_position_size(
         "warnings": warnings,
         "error": None,
     }
+    return apply_risk_multipliers_to_position_sizing(result, config=config)
 
 
 def calculate_option_position_size(
@@ -199,7 +254,7 @@ def calculate_option_position_size(
     if contracts < 1:
         warnings.append("Suggested contract size is zero because the option premium is too large for the configured account and risk settings.")
 
-    return {
+    result = {
         "ok": True,
         "asset_type": "option",
         "ticker": ticker,
@@ -216,6 +271,7 @@ def calculate_option_position_size(
         "warnings": warnings,
         "error": None,
     }
+    return apply_risk_multipliers_to_position_sizing(result, config=config)
 
 
 def calculate_position_size(

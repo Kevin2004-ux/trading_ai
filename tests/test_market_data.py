@@ -7,6 +7,7 @@ from realtime.market_data import (
     calculate_technical_snapshot,
     get_data_freshness,
     get_historical_bars,
+    get_market_snapshot,
     normalize_ohlcv,
 )
 
@@ -121,3 +122,37 @@ def test_get_historical_bars_handles_missing_polygon_api_key(monkeypatch):
     assert result["ticker"] == "AAPL"
     assert result["data"] is None
     assert "POLYGON_API_KEY is not configured" in result["error"]
+
+
+def test_get_market_snapshot_ibkr_fallback_includes_data_quality(monkeypatch):
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "ibkr")
+    monkeypatch.setattr(config, "MARKET_DATA_PROVIDER", "ibkr", raising=False)
+    monkeypatch.setattr(
+        "providers.ibkr_provider.get_ibkr_market_snapshot",
+        lambda ticker, lookback_days=180: {
+            "ok": True,
+            "ticker": ticker,
+            "source": "ibkr",
+            "data": {
+                "quote": {"last_price": 100.0, "quote_source": "historical_bar_fallback"},
+                "quote_status": "unavailable",
+                "quote_fallback_used": True,
+                "technical_snapshot": {"ok": True, "current_price": 100.0},
+                "data_freshness": {"ok": True, "age_days": 1, "is_stale": False},
+                "data_quality": {
+                    "quality_label": "usable_with_warnings",
+                    "price_source": "historical_bar_fallback",
+                    "quote_status": "unavailable",
+                    "final_recommendation_allowed": True,
+                    "warnings": ["IBKR live quote unavailable; using latest historical close."],
+                    "errors": [],
+                },
+            },
+            "error": None,
+        },
+    )
+
+    result = get_market_snapshot("AAPL")
+
+    assert result["ok"] is True
+    assert result["data"]["data_quality"]["quality_label"] == "usable_with_warnings"

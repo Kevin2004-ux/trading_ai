@@ -38,6 +38,9 @@ from tools.agent_tools import (
 )
 
 from .prompts import SYSTEM_PROMPT
+from .prompt_templates import build_gemini_system_prompt
+from .output_validator import validate_gemini_output
+from .response_formatter import format_validated_trade_response
 
 try:
     import google.generativeai as genai
@@ -124,7 +127,7 @@ def _build_model():
         _MODEL = genai.GenerativeModel(
             model_name=MODEL_NAME,
             tools=get_registered_tools(),
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=build_gemini_system_prompt(),
         )
         _MODEL_INIT_ERROR = None
         return _MODEL
@@ -153,3 +156,13 @@ def ask_translator(question: str) -> str:
     except Exception as exc:
         print(f"An error occurred with the generative model: {exc}")
         return "Sorry, an error occurred while contacting the AI."
+
+
+def validate_and_format_gemini_trade_output(gemini_output: dict | str, trading_brain_result: dict) -> dict:
+    validation = validate_gemini_output(gemini_output, trading_brain_result)
+    return {
+        "ok": bool(validation.get("ok")),
+        "validation": validation,
+        "formatted_response": format_validated_trade_response(validation, fallback_result=trading_brain_result),
+        "deterministic_fallback_used": not bool(validation.get("safe_to_show_user")),
+    }

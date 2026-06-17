@@ -63,7 +63,7 @@ def _selection_result(count: int = 4) -> dict:
     }
 
 
-def test_bullish_indexes_produce_risk_on_uptrend():
+def test_bullish_indexes_without_breadth_produce_weak_bull_chop():
     result = determine_market_regime(
         spy_snapshot=_snapshot("SPY", current_price=600, sma_20=590, sma_50=580, sma_200=550),
         qqq_snapshot=_snapshot("QQQ", current_price=520, sma_20=510, sma_50=500, sma_200=470),
@@ -72,7 +72,7 @@ def test_bullish_indexes_produce_risk_on_uptrend():
     )
 
     assert result["ok"] is True
-    assert result["regime"] == "risk_on_uptrend"
+    assert result["regime"] == "weak_bull_chop"
     assert result["long_bias"] is True
 
 
@@ -84,7 +84,7 @@ def test_extended_indexes_produce_risk_on_extended():
         vix_snapshot={"ok": True, "ticker": "VIX", "data": {"technical_snapshot": {"current_price": 17.0}}},
     )
 
-    assert result["regime"] == "risk_on_extended"
+    assert result["regime"] == "weak_bull_chop"
 
 
 def test_bearish_indexes_produce_risk_off_downtrend():
@@ -95,8 +95,8 @@ def test_bearish_indexes_produce_risk_off_downtrend():
         vix_snapshot={"ok": True, "ticker": "VIX", "data": {"technical_snapshot": {"current_price": 21.0}}},
     )
 
-    assert result["regime"] == "risk_off_downtrend"
-    assert result["trade_aggressiveness"] == "none"
+    assert result["regime"] == "bear_trend"
+    assert result["trade_aggressiveness"] == "defensive"
 
 
 def test_high_vix_produces_high_volatility():
@@ -107,7 +107,7 @@ def test_high_vix_produces_high_volatility():
         vix_snapshot={"ok": True, "ticker": "VIX", "data": {"technical_snapshot": {"current_price": 33.0}}},
     )
 
-    assert result["regime"] == "high_volatility"
+    assert result["regime"] == "high_volatility_risk_off"
     assert result["options_aggressiveness"] == "avoid"
 
 

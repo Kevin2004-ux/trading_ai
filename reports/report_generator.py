@@ -4,9 +4,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from journal.trade_journal import get_trade_reviews
+from alerts.alert_manager import list_alerts
+from analytics.filter_attribution import analyze_filter_attribution
+from analytics.performance_attribution import analyze_paper_trade_performance
+from analytics.strategy_diagnostics import diagnose_strategy_health
+from analytics.trade_error_analysis import analyze_trade_errors
+from jobs.job_history import list_job_runs
 from tracking.trade_logger import (
+    get_candidate_decision_history,
     get_open_recommendations,
     get_strategy_performance,
+    get_trade_history,
     get_win_loss_record,
 )
 
@@ -73,6 +81,175 @@ def _section(title: str, body: str, data: Any = None) -> dict:
         "body": body,
         "data": data,
     }
+
+
+def _scheduled_ops_section(job_history: dict | None, alert_summary: dict | None) -> dict:
+    jobs = _coalesce_dict(job_history)
+    alerts = _coalesce_dict(alert_summary)
+    job_runs = _coalesce_list(jobs.get("job_runs"))
+    alert_rows = _coalesce_list(alerts.get("alerts"))
+    latest_run = job_runs[0] if job_runs and isinstance(job_runs[0], dict) else {}
+    failed_count = len(
+        [
+            run
+            for run in job_runs
+            if isinstance(run, dict) and str(run.get("status", "")).lower() == "failed"
+        ]
+    )
+    paper_run = next(
+        (
+            run
+            for run in job_runs
+            if isinstance(run, dict)
+            and (
+                str(run.get("job_type", "")).lower() == "paper_cycle"
+                or "paper" in str(run.get("job_name", "")).lower()
+            )
+        ),
+        {},
+    )
+    body = _bullet_lines(
+        [
+            f"Latest job: {latest_run.get('job_name', 'N/A')} status={latest_run.get('status', 'N/A')}",
+            f"Latest job started: {latest_run.get('started_at', 'N/A')}",
+            f"Failed job count in sample: {failed_count}",
+            f"Paper-cycle job status: {paper_run.get('status', 'N/A')}",
+            f"Recent alert count: {alerts.get('count', len(alert_rows))}",
+            f"Severity counts: {alerts.get('severity_counts', {})}",
+        ]
+    )
+    return _section(
+        "Scheduled Jobs And Alerts",
+        body,
+        {
+            "job_history": jobs,
+            "alert_summary": alerts,
+            "failed_job_count": failed_count,
+            "paper_cycle_job_status": paper_run.get("status"),
+        },
+    )
+
+
+def _performance_diagnostics_from_payload(payload: dict) -> dict:
+    return {
+        "performance_attribution": _coalesce_dict(payload.get("performance_attribution") or _coalesce_dict(payload.get("summary")).get("performance_attribution")),
+        "setup_diagnostics": _coalesce_dict(payload.get("setup_diagnostics") or _coalesce_dict(payload.get("summary")).get("setup_diagnostics")),
+        "filter_attribution": _coalesce_dict(payload.get("filter_attribution") or _coalesce_dict(payload.get("summary")).get("filter_attribution")),
+        "trade_error_analysis": _coalesce_dict(payload.get("trade_error_analysis") or _coalesce_dict(payload.get("summary")).get("trade_error_analysis")),
+    }
+
+
+def _performance_diagnostics_sections(diagnostics: dict) -> list[dict]:
+    performance = _coalesce_dict(diagnostics.get("performance_attribution"))
+    setup = _coalesce_dict(diagnostics.get("setup_diagnostics"))
+    filters = _coalesce_dict(diagnostics.get("filter_attribution"))
+    errors = _coalesce_dict(diagnostics.get("trade_error_analysis"))
+    sections: list[dict] = []
+    if performance:
+        sections.append(
+            _section(
+                "Performance Attribution",
+                _bullet_lines(
+                    [
+                        f"Closed paper trades: {performance.get('closed_trade_count', 0)}",
+                        f"Open paper trades: {performance.get('open_trade_count', 0)}",
+                        f"Win rate: {_fmt_num(performance.get('win_rate'))}%",
+                        f"Expectancy: {_fmt_num(performance.get('expectancy_r'))}R",
+                        f"Profit factor: {_fmt_num(performance.get('profit_factor'))}",
+                        f"Max drawdown: {_fmt_num(performance.get('max_drawdown_r'))}R",
+                        f"Best trade: {_coalesce_dict(performance.get('best_trade')).get('ticker', 'N/A')}",
+                        f"Worst trade: {_coalesce_dict(performance.get('worst_trade')).get('ticker', 'N/A')}",
+                        *[f"Warning: {warning}" for warning in _coalesce_list(performance.get("warnings"))[:5]],
+                    ]
+                ),
+                performance,
+            )
+        )
+    if setup:
+        setup_rows = _coalesce_list(setup.get("setups"))
+        sections.append(
+            _section(
+                "Setup Diagnostics",
+                _bullet_lines(
+                    [
+                        f"Overall status: {setup.get('overall_status', 'N/A')}",
+                        *[
+                            f"{row.get('setup_type', 'unknown')}: status={row.get('status')}, expectancy={_fmt_num(row.get('expectancy_r'))}R, win_rate={_fmt_num(row.get('win_rate'))}%"
+                            for row in setup_rows[:10]
+                            if isinstance(row, dict)
+                        ],
+                        *[f"Recommendation: {item}" for item in _coalesce_list(setup.get("recommendations"))[:5]],
+                    ]
+                ),
+                setup,
+            )
+        )
+    if filters:
+        filter_rows = _coalesce_list(filters.get("filters"))
+        sections.append(
+            _section(
+                "Filter Attribution",
+                _bullet_lines(
+                    [
+                        *[
+                            f"{row.get('filter_name', 'unknown')}: status={row.get('diagnostic_status')}, applied={row.get('applied_count', 0)}, blocked={row.get('blocked_count', 0)}, downgraded={row.get('downgraded_count', 0)}"
+                            for row in filter_rows[:12]
+                            if isinstance(row, dict)
+                        ],
+                        *[f"Warning: {warning}" for warning in _coalesce_list(filters.get("warnings"))[:5]],
+                    ]
+                ),
+                filters,
+            )
+        )
+    if errors:
+        top_modes = _coalesce_list(errors.get("top_failure_modes"))
+        sections.append(
+            _section(
+                "Trade Error Analysis",
+                _bullet_lines(
+                    [
+                        *[
+                            f"{row.get('category', 'unknown')}: {row.get('count', 0)}"
+                            for row in top_modes[:8]
+                            if isinstance(row, dict)
+                        ],
+                        *[f"Recommendation: {item}" for item in _coalesce_list(errors.get("recommendations"))[:5]],
+                        *[f"Warning: {warning}" for warning in _coalesce_list(errors.get("warnings"))[:5]],
+                    ]
+                ),
+                errors,
+            )
+        )
+    return sections
+
+
+def _stress_test_section(stress_summary: dict | None) -> dict:
+    stress = _coalesce_dict(stress_summary)
+    results = _coalesce_list(stress.get("results"))
+    portfolio = _coalesce_dict(stress.get("portfolio_stress"))
+    body = _bullet_lines(
+        [
+            f"Scenarios run: {stress.get('scenario_count', len(results))}",
+            f"Passed expected behavior: {stress.get('passed_count', 0)}",
+            f"Failed expected behavior: {stress.get('failed_count', 0)}",
+            f"Blocked-new-trades scenarios: {stress.get('blocked_new_trades_count', 0)}",
+            f"Risk-reduced scenarios: {stress.get('risk_reduced_count', 0)}",
+            f"Estimated portfolio stress loss: {_fmt_num(portfolio.get('estimated_total_loss_r'))}R",
+            *[
+                f"{item.get('scenario_name', 'unknown')}: passed={item.get('passed_expected_behavior')}, severity={item.get('severity')}"
+                for item in results[:10]
+                if isinstance(item, dict)
+            ],
+            *[
+                f"Critical finding: {item.get('scenario_name', 'unknown')} - {item.get('message', '')}"
+                for item in _coalesce_list(stress.get("critical_findings"))[:6]
+                if isinstance(item, dict)
+            ],
+            *[f"Warning: {warning}" for warning in _coalesce_list(stress.get("warnings"))[:6]],
+        ]
+    ) if stress else "No stress-test summary attached."
+    return _section("Stress Test Summary", body, stress)
 
 
 def _report_error(report_type: str, fmt: str, error: str) -> dict:
@@ -143,6 +320,25 @@ def _decision_trade_lines(trade: dict) -> list[str]:
     position_sizing = _coalesce_dict(trade.get("position_sizing"))
     portfolio_risk = _coalesce_dict(trade.get("portfolio_risk"))
     option_context = _coalesce_dict(trade.get("preferred_option_mispricing_context"))
+    option_trade_risk = _coalesce_dict(trade.get("preferred_option_trade_risk"))
+    selected_strategy = _coalesce_dict(trade.get("selected_option_strategy"))
+    paper_fill = _coalesce_dict(trade.get("paper_fill"))
+    filing_sentiment = _coalesce_dict(trade.get("filing_sentiment"))
+    if not filing_sentiment:
+        filing_sentiment = _coalesce_dict(_coalesce_dict(trade.get("source_candidate")).get("filing_sentiment"))
+    short_interest = _coalesce_dict(trade.get("short_interest"))
+    borrow_pressure = _coalesce_dict(trade.get("borrow_pressure"))
+    news_sentiment = _coalesce_dict(trade.get("news_sentiment"))
+    source_candidate = _coalesce_dict(trade.get("source_candidate"))
+    if not short_interest:
+        short_interest = _coalesce_dict(source_candidate.get("short_interest"))
+    if not borrow_pressure:
+        borrow_pressure = _coalesce_dict(source_candidate.get("borrow_pressure"))
+    if not news_sentiment:
+        news_sentiment = _coalesce_dict(source_candidate.get("news_sentiment"))
+    if not paper_fill:
+        source_candidate = _coalesce_dict(trade.get("source_candidate"))
+        paper_fill = _coalesce_dict(source_candidate.get("paper_fill"))
     lines = [
         f"Ticker: {trade.get('ticker', 'N/A')}",
         f"Asset type: {trade.get('asset_type', 'stock')}",
@@ -158,12 +354,71 @@ def _decision_trade_lines(trade: dict) -> list[str]:
         f"Invalidation: {trade.get('invalidation') or 'N/A'}",
         f"Key risks: {', '.join(risks) if risks else 'N/A'}",
     ]
+    if filing_sentiment:
+        lines.extend(
+            [
+                f"Filing sentiment: {filing_sentiment.get('sentiment_label', 'N/A')}",
+                f"Filing risk level: {filing_sentiment.get('filing_risk_level', 'N/A')}",
+                f"Filing trade impact: {filing_sentiment.get('trade_impact', 'N/A')}",
+                f"Filing risk multiplier: {_fmt_num(filing_sentiment.get('risk_multiplier'))}",
+            ]
+        )
+    if short_interest:
+        lines.extend(
+            [
+                f"Short interest level: {short_interest.get('short_interest_level', 'N/A')}",
+                f"Days to cover: {_fmt_num(short_interest.get('days_to_cover'))}",
+                f"Squeeze risk: {short_interest.get('squeeze_risk', 'N/A')}",
+            ]
+        )
+    if borrow_pressure:
+        lines.append(f"Borrow pressure: {borrow_pressure.get('borrow_pressure', 'N/A')}")
+    if news_sentiment:
+        lines.extend(
+            [
+                f"Headline sentiment: {news_sentiment.get('sentiment_label', 'N/A')}",
+                f"Headline risk: {news_sentiment.get('headline_risk_level', 'N/A')}",
+                f"Headline risk flags: {', '.join(str(flag) for flag in _coalesce_list(news_sentiment.get('risk_flags'))) or 'N/A'}",
+            ]
+        )
+    if paper_fill:
+        lines.extend(
+            [
+                f"Intended entry: {_fmt_price(paper_fill.get('intended_entry_price'))}",
+                f"Estimated paper fill: {_fmt_price(paper_fill.get('estimated_fill_price'))}",
+                f"Fill quality: {paper_fill.get('fill_quality', 'N/A')}",
+                f"Fill warning: {paper_fill.get('paper_fill_warning') or 'Simulated fill; no live order was placed.'}",
+            ]
+        )
     if trade.get("preferred_option_contract"):
         lines.append(f"Preferred option: {trade.get('preferred_option_contract')}")
     elif isinstance(trade.get("option_alternatives"), list) and trade["option_alternatives"]:
         lines.append(f"Option alternative: {trade['option_alternatives'][0].get('option_contract', 'N/A')}")
     if option_context:
         lines.append(f"Option context: {option_context.get('mispricing_label') or option_context}")
+    if option_trade_risk:
+        iv_context = _coalesce_dict(option_trade_risk.get("iv_context"))
+        greeks = _coalesce_dict(option_trade_risk.get("greeks"))
+        lines.extend(
+            [
+                f"Option risk status: {option_trade_risk.get('status', 'N/A')}",
+                f"IV rank/percentile: {_fmt_num(iv_context.get('iv_rank'))}/{_fmt_num(iv_context.get('iv_percentile'))}",
+                f"IV context: {iv_context.get('iv_context', 'N/A')}",
+                f"Greeks quality: {greeks.get('greeks_quality', 'N/A')}",
+                f"DTE risk: {option_trade_risk.get('days_to_expiration', 'N/A')} DTE",
+                f"Option fill quality: {option_trade_risk.get('fill_quality', 'N/A')}",
+            ]
+        )
+    if selected_strategy:
+        lines.extend(
+            [
+                f"Selected option strategy: {selected_strategy.get('strategy_type', 'N/A')}",
+                f"Strategy status: {selected_strategy.get('status', 'N/A')}",
+                f"Strategy debit/credit: {_fmt_num(selected_strategy.get('net_debit'))}/{_fmt_num(selected_strategy.get('net_credit'))}",
+                f"Strategy max loss/profit: {_fmt_num(selected_strategy.get('max_loss'))}/{_fmt_num(selected_strategy.get('max_profit'))}",
+                f"Strategy breakeven: {_fmt_price(selected_strategy.get('breakeven'))}",
+            ]
+        )
     if trade.get("similar_setup_context"):
         lines.append("Memory/research notes: Similar setup context was attached.")
     return lines
@@ -181,12 +436,43 @@ def generate_weekly_trade_plan_report(
     selection_result = _coalesce_dict(payload.get("selection_result"))
     market_regime = _coalesce_dict(payload.get("market_regime"))
     portfolio_risk = _coalesce_dict(payload.get("portfolio_risk"))
+    summary_payload = _coalesce_dict(payload.get("summary"))
+    concentration_summary = _coalesce_dict(payload.get("concentration_summary") or summary_payload.get("concentration_summary") or decision_result.get("concentration_summary") or selection_result.get("concentration_summary"))
+    technical_confirmation_summary = _coalesce_dict(payload.get("technical_confirmation_summary") or summary_payload.get("technical_confirmation_summary") or decision_result.get("technical_confirmation_summary") or selection_result.get("technical_confirmation_summary"))
+    option_research = _coalesce_dict(payload.get("option_research") or selection_result.get("option_research"))
+    option_risk_summary = _coalesce_dict(payload.get("option_risk_summary") or summary_payload.get("option_risk_summary") or selection_result.get("option_risk_summary") or option_research.get("option_risk_summary"))
+    option_strategy_summary = _coalesce_dict(payload.get("option_strategy_summary") or summary_payload.get("option_strategy_summary") or selection_result.get("option_strategy_summary") or _coalesce_dict(option_research.get("summary")).get("option_strategy_summary"))
+    macro_risk = _coalesce_dict(payload.get("macro_risk") or summary_payload.get("macro_risk") or decision_result.get("macro_risk"))
+    circuit_breaker = _coalesce_dict(summary_payload.get("circuit_breaker") or _coalesce_dict(decision_result).get("circuit_breaker"))
+    setup_decay = _coalesce_dict(summary_payload.get("setup_decay") or _coalesce_dict(decision_result).get("setup_decay"))
+    scan_execution = _coalesce_dict(payload.get("scan_execution_summary") or summary_payload.get("scan_execution_summary") or _coalesce_dict(payload.get("scan_result")).get("scan_execution_summary"))
+    pipeline_run = _coalesce_dict(payload.get("pipeline_run"))
+    checkpoint_summary = _coalesce_dict(payload.get("checkpoint_summary"))
+    audit_status = _coalesce_dict(payload.get("audit_status"))
+    schema_version = _coalesce_dict(payload.get("schema_version"))
+    startup_readiness = _coalesce_dict(payload.get("startup_readiness") or summary_payload.get("startup_readiness"))
+    job_history = _coalesce_dict(payload.get("job_history") or summary_payload.get("job_history"))
+    alert_summary = _coalesce_dict(payload.get("alert_summary") or summary_payload.get("alert_summary"))
+    gemini_validation = _coalesce_dict(payload.get("gemini_validation") or payload.get("validation") or summary_payload.get("gemini_validation"))
+    memory_summary = _coalesce_dict(payload.get("memory_summary") or summary_payload.get("memory_summary") or _coalesce_dict(payload.get("decision_result")).get("memory_summary"))
+    stress_test_summary = _coalesce_dict(payload.get("stress_test_summary") or summary_payload.get("stress_test_summary"))
+    performance_diagnostics = _performance_diagnostics_from_payload(payload)
     selected_trades = _coalesce_list(decision_result.get("final_recommendations"))
     watchlist = _coalesce_list(selection_result.get("watchlist_alternatives"))
     risk_rejected = _coalesce_list(decision_result.get("risk_rejected"))
     rejected = _coalesce_list(selection_result.get("rejected_candidates")) + _coalesce_list(decision_result.get("not_selected"))
     warnings = [SIMULATION_WARNING]
     missing: list[str] = []
+    scan_quality = _coalesce_dict(_coalesce_dict(payload.get("scan_result")).get("data_quality_summary"))
+    summary_quality = _coalesce_dict(_coalesce_dict(payload.get("summary")).get("data_quality"))
+    for quality_payload in (scan_quality, summary_quality):
+        quality_warnings = _coalesce_list(quality_payload.get("warnings"))
+        quality_errors = _coalesce_list(quality_payload.get("errors"))
+        if quality_payload:
+            warnings.append(f"Data quality summary: {quality_payload.get('worst_quality_label', 'unknown')}.")
+        warnings.extend(str(item) for item in quality_warnings[:5])
+        warnings.extend(str(item) for item in quality_errors[:5])
+    warnings.extend(str(item) for item in _coalesce_list(scan_execution.get("warnings"))[:5])
 
     if not selected_trades:
         missing.append("selected_trades")
@@ -218,7 +504,230 @@ def generate_weekly_trade_plan_report(
             for trade in selected_trades
         ]
     )
-    regime_summary = market_regime.get("summary") or market_regime.get("regime") or "Market regime summary unavailable."
+    option_risk_evaluations = _coalesce_list(option_risk_summary.get("evaluations"))
+    option_risk_body = _bullet_lines(
+        [
+            f"Evaluated option contracts: {option_risk_summary.get('evaluated_count', 0)}",
+            f"Paper-eligible contracts: {option_risk_summary.get('approved_count', 0)}",
+            f"Research-only contracts: {option_risk_summary.get('research_only_count', 0)}",
+            f"Blocked contracts: {option_risk_summary.get('blocked_count', 0)}",
+            *[
+                (
+                    f"{item.get('option_contract', 'Unknown')}: status={_coalesce_dict(item.get('option_trade_risk')).get('status')}, "
+                    f"IV={_coalesce_dict(item.get('iv_context')).get('iv_context', 'N/A')} "
+                    f"rank={_fmt_num(_coalesce_dict(item.get('iv_context')).get('iv_rank'))}, "
+                    f"greeks={_coalesce_dict(item.get('greeks_monitoring')).get('greeks_quality', 'N/A')}, "
+                    f"DTE={_coalesce_dict(item.get('option_trade_risk')).get('days_to_expiration', 'N/A')}, "
+                    f"spread/fill={_coalesce_dict(item.get('option_trade_risk')).get('spread_quality', 'N/A')}/{_coalesce_dict(item.get('option_trade_risk')).get('fill_quality', 'N/A')}"
+                )
+                for item in option_risk_evaluations[:10]
+                if isinstance(item, dict)
+            ],
+        ]
+    ) if option_risk_summary else "No IV/Greeks option risk context attached."
+    strategy_candidates = _coalesce_list(option_research.get("option_strategy_candidates"))
+    if not strategy_candidates:
+        strategy_candidates = _coalesce_list(option_research.get("selected_option_strategies"))
+    strategy_body = _bullet_lines(
+        [
+            f"Strategy candidates: {option_strategy_summary.get('strategy_count', 0)}",
+            f"Paper-eligible strategies: {option_strategy_summary.get('paper_eligible_count', 0)}",
+            f"Research-only strategies: {option_strategy_summary.get('research_only_count', 0)}",
+            f"Blocked strategies: {option_strategy_summary.get('blocked_count', 0)}",
+            *[
+                (
+                    f"{item.get('strategy_type', 'Unknown')}: status={item.get('status', 'N/A')}, "
+                    f"debit={_fmt_num(item.get('net_debit'))}, credit={_fmt_num(item.get('net_credit'))}, "
+                    f"max_loss={_fmt_num(item.get('max_loss'))}, max_profit={_fmt_num(item.get('max_profit'))}, "
+                    f"breakeven={_fmt_price(item.get('breakeven'))}"
+                )
+                for item in strategy_candidates[:10]
+                if isinstance(item, dict)
+            ],
+        ]
+    ) if option_strategy_summary else "No option strategy comparison context attached."
+    macro_body = _bullet_lines(
+        [
+            f"Risk level: {macro_risk.get('macro_risk_level', 'N/A')}",
+            f"Risk multiplier: {_fmt_num(macro_risk.get('risk_multiplier'))}",
+            f"New trades allowed: {macro_risk.get('new_trades_allowed', 'N/A')}",
+            f"Active events: {len(_coalesce_list(macro_risk.get('active_events')))}",
+            f"Upcoming events: {len(_coalesce_list(macro_risk.get('upcoming_events')))}",
+            *[f"Warning: {warning}" for warning in _coalesce_list(macro_risk.get("warnings"))],
+            *[f"Reason: {reason}" for reason in _coalesce_list(macro_risk.get("reasons"))],
+        ]
+    ) if macro_risk else "No macro risk context attached."
+    regime_body = _bullet_lines(
+        [
+            f"Regime: {market_regime.get('regime', 'N/A')}",
+            f"Risk level: {market_regime.get('risk_level', 'N/A')}",
+            f"Confidence: {_fmt_num(market_regime.get('confidence'))}",
+            f"Stock risk multiplier: {_fmt_num(market_regime.get('stock_risk_multiplier'))}",
+            f"Option risk multiplier: {_fmt_num(market_regime.get('option_risk_multiplier'))}",
+            f"Allowed setups: {', '.join(str(item) for item in _coalesce_list(market_regime.get('allowed_setups'))) or 'N/A'}",
+            f"Blocked setups: {', '.join(str(item) for item in _coalesce_list(market_regime.get('blocked_setups'))) or 'N/A'}",
+            *[f"Warning: {warning}" for warning in _coalesce_list(market_regime.get("warnings"))],
+        ]
+    ) if market_regime else "Market regime summary unavailable."
+    concentration_snapshot = _coalesce_dict(concentration_summary.get("snapshot"))
+    latest_snapshot = _coalesce_dict(concentration_snapshot.get("latest_snapshot"))
+    snapshot_payload = _coalesce_dict(latest_snapshot.get("snapshot"))
+    concentration_evaluations = _coalesce_list(concentration_summary.get("evaluations"))
+    concentration_body = _bullet_lines(
+        [
+            f"Snapshot source: {concentration_snapshot.get('source', 'N/A')}",
+            f"Latest snapshot age hours: {_fmt_num(snapshot_payload.get('age_hours'))}",
+            f"Evaluated candidates: {concentration_summary.get('evaluated_count', 0)}",
+            f"Blocked candidates: {concentration_summary.get('blocked_count', 0)}",
+            f"Reduced-risk candidates: {concentration_summary.get('reduced_count', 0)}",
+            *[
+                f"{item.get('ticker', 'Unknown')}: risk_level={_coalesce_dict(item.get('concentration_risk')).get('risk_level')}, multiplier={_fmt_num(_coalesce_dict(item.get('concentration_risk')).get('risk_multiplier'))}"
+                for item in concentration_evaluations
+                if isinstance(item, dict)
+            ],
+            *[f"Warning: {warning}" for warning in _coalesce_list(concentration_snapshot.get("warnings"))[:5]],
+        ]
+    ) if concentration_summary else "No concentration risk context attached."
+    technical_evaluations = _coalesce_list(technical_confirmation_summary.get("evaluations"))
+    technical_body = _bullet_lines(
+        [
+            f"Evaluated candidates: {technical_confirmation_summary.get('evaluated_count', 0)}",
+            f"Rejected by technical confirmation: {technical_confirmation_summary.get('rejected_count', 0)}",
+            f"Warning/downgraded candidates: {technical_confirmation_summary.get('warning_count', 0)}",
+            *[
+                (
+                    f"{item.get('ticker', 'Unknown')}: status={_coalesce_dict(item.get('technical_confirmation_summary')).get('status')}, "
+                    f"score_adjustment={_fmt_num(_coalesce_dict(item.get('technical_confirmation_summary')).get('score_adjustment'))}, "
+                    f"risk_multiplier={_fmt_num(_coalesce_dict(item.get('technical_confirmation_summary')).get('risk_multiplier'))}, "
+                    f"POC={_fmt_price(_coalesce_dict(item.get('volume_profile_confirmation')).get('point_of_control'))}, "
+                    f"value_area={_fmt_price(_coalesce_dict(item.get('volume_profile_confirmation')).get('value_area_low'))}-{_fmt_price(_coalesce_dict(item.get('volume_profile_confirmation')).get('value_area_high'))}, "
+                    f"daily={_coalesce_dict(item.get('timeframe_confirmation')).get('daily_trend', 'N/A')}, "
+                    f"weekly={_coalesce_dict(item.get('timeframe_confirmation')).get('weekly_trend', 'N/A')}"
+                )
+                for item in technical_evaluations
+                if isinstance(item, dict)
+            ],
+        ]
+    ) if technical_confirmation_summary else "No technical confirmation context attached."
+    filing_summary = _coalesce_dict(payload.get("filing_sentiment_summary") or summary_payload.get("filing_sentiment_summary") or decision_result.get("filing_sentiment_summary") or selection_result.get("filing_sentiment_summary"))
+    filing_evaluations = _coalesce_list(filing_summary.get("evaluations"))
+    if not filing_evaluations:
+        for collection_name, collection in (
+            ("selected", selected_trades),
+            ("watchlist", watchlist),
+            ("rejected", rejected + risk_rejected),
+        ):
+            for item in collection:
+                candidate = _coalesce_dict(_coalesce_dict(item).get("candidate")) or _coalesce_dict(item)
+                sentiment = _coalesce_dict(candidate.get("filing_sentiment") or _coalesce_dict(candidate.get("source_candidate")).get("filing_sentiment"))
+                analysis = _coalesce_dict(candidate.get("filing_analysis") or _coalesce_dict(candidate.get("source_candidate")).get("filing_analysis"))
+                earnings = _coalesce_dict(candidate.get("earnings_8k_analysis") or _coalesce_dict(candidate.get("source_candidate")).get("earnings_8k_analysis"))
+                if sentiment or analysis or earnings:
+                    filing_evaluations.append(
+                        {
+                            "ticker": candidate.get("ticker"),
+                            "bucket": collection_name,
+                            "filing_sentiment": sentiment,
+                            "filing_analysis": analysis,
+                            "earnings_8k_analysis": earnings,
+                        }
+                    )
+    filing_body = _bullet_lines(
+        [
+            f"Evaluated candidates: {filing_summary.get('evaluated_count', len(filing_evaluations))}",
+            f"Critical/blocking candidates: {filing_summary.get('blocking_count', 0)}",
+            f"High-risk candidates: {filing_summary.get('high_risk_count', 0)}",
+            *[
+                (
+                    f"{item.get('ticker', 'Unknown')}: bucket={item.get('bucket', 'N/A')}, "
+                    f"sentiment={_coalesce_dict(item.get('filing_sentiment')).get('sentiment_label', 'N/A')}, "
+                    f"risk={_coalesce_dict(item.get('filing_sentiment')).get('filing_risk_level', _coalesce_dict(item.get('filing_analysis')).get('filing_risk_level', 'N/A'))}, "
+                    f"impact={_coalesce_dict(item.get('filing_sentiment')).get('trade_impact', 'N/A')}, "
+                    f"events={', '.join(str(event) for event in _coalesce_list(_coalesce_dict(item.get('filing_analysis')).get('material_events'))[:3]) or 'N/A'}, "
+                    f"earnings_8k={_coalesce_dict(item.get('earnings_8k_analysis')).get('sentiment_label', 'N/A')}"
+                )
+                for item in filing_evaluations[:10]
+                if isinstance(item, dict)
+            ],
+        ]
+    ) if (filing_summary or filing_evaluations) else "No SEC filing sentiment context attached."
+    research_risk_summary = _coalesce_dict(payload.get("research_risk_summary") or summary_payload.get("research_risk_summary") or decision_result.get("research_risk_summary") or selection_result.get("research_risk_summary"))
+    research_evaluations = _coalesce_list(research_risk_summary.get("evaluations"))
+    if not research_evaluations:
+        for collection_name, collection in (
+            ("selected", selected_trades),
+            ("watchlist", watchlist),
+            ("rejected", rejected + risk_rejected),
+        ):
+            for item in collection:
+                candidate = _coalesce_dict(_coalesce_dict(item).get("candidate")) or _coalesce_dict(item)
+                source = _coalesce_dict(candidate.get("source_candidate"))
+                short_context = _coalesce_dict(candidate.get("short_interest") or source.get("short_interest"))
+                borrow_context = _coalesce_dict(candidate.get("borrow_pressure") or source.get("borrow_pressure"))
+                news_context = _coalesce_dict(candidate.get("news_sentiment") or source.get("news_sentiment"))
+                if short_context or borrow_context or news_context:
+                    research_evaluations.append(
+                        {
+                            "ticker": candidate.get("ticker"),
+                            "bucket": collection_name,
+                            "short_interest": short_context,
+                            "borrow_pressure": borrow_context,
+                            "news_sentiment": news_context,
+                        }
+                    )
+    research_risk_body = _bullet_lines(
+        [
+            f"Evaluated candidates: {research_risk_summary.get('evaluated_count', len(research_evaluations))}",
+            f"Blocking research risks: {research_risk_summary.get('blocking_count', 0)}",
+            f"Reduced-risk candidates: {research_risk_summary.get('reduced_count', 0)}",
+            *[
+                (
+                    f"{item.get('ticker', 'Unknown')}: bucket={item.get('bucket', 'N/A')}, "
+                    f"short={_coalesce_dict(item.get('short_interest')).get('short_interest_level', 'N/A')}, "
+                    f"days_to_cover={_fmt_num(_coalesce_dict(item.get('short_interest')).get('days_to_cover'))}, "
+                    f"squeeze={_coalesce_dict(item.get('short_interest')).get('squeeze_risk', 'N/A')}, "
+                    f"borrow={_coalesce_dict(item.get('borrow_pressure')).get('borrow_pressure', 'N/A')}, "
+                    f"headline={_coalesce_dict(item.get('news_sentiment')).get('sentiment_label', 'N/A')}, "
+                    f"headline_risk={_coalesce_dict(item.get('news_sentiment')).get('headline_risk_level', 'N/A')}, "
+                    f"flags={', '.join(str(flag) for flag in _coalesce_list(_coalesce_dict(item.get('news_sentiment')).get('risk_flags'))[:3]) or 'N/A'}"
+                )
+                for item in research_evaluations[:10]
+                if isinstance(item, dict)
+            ],
+        ]
+    ) if (research_risk_summary or research_evaluations) else "No short-interest, borrow, or news risk context attached."
+    memory_rows = []
+    for trade in selected_trades:
+        if not isinstance(trade, dict):
+            continue
+        context = _coalesce_dict(trade.get("memory_context"))
+        quality = _coalesce_dict(context.get("retrieval_quality") or trade.get("retrieval_quality"))
+        impact = _coalesce_dict(context.get("memory_impact"))
+        feedback = _coalesce_dict(context.get("human_feedback") or trade.get("human_feedback"))
+        if context or quality or feedback:
+            memory_rows.append(
+                (
+                    f"{trade.get('ticker', 'Unknown')}: quality={quality.get('quality_status', 'N/A')}, "
+                    f"top_similarity={_fmt_num(quality.get('top_score'))}, "
+                    f"decision_support={quality.get('usable_for_decision_support', False)}, "
+                    f"explanation={quality.get('usable_for_explanation', False)}, "
+                    f"impact={impact.get('trade_impact', 'N/A')}, "
+                    f"score_adjustment={_fmt_num(impact.get('score_adjustment'))}, "
+                    f"risk_multiplier={_fmt_num(impact.get('risk_multiplier'))}, "
+                    f"feedback={feedback.get('feedback_status', 'N/A')}"
+                )
+            )
+    memory_body = _bullet_lines(
+        [
+            f"Memory enabled: {memory_summary.get('enabled', False)}",
+            f"Evaluated candidates: {memory_summary.get('evaluated_count', len(memory_rows))}",
+            f"Used for decision support: {memory_summary.get('decision_support_count', 0)}",
+            f"Explanation-only: {memory_summary.get('explanation_only_count', 0)}",
+            f"Ignored/failed quality: {memory_summary.get('ignored_count', 0)}",
+            *memory_rows,
+            *[f"Warning: {warning}" for warning in _coalesce_list(memory_summary.get("warnings"))[:8]],
+        ]
+    ) if (memory_summary or memory_rows) else "Memory is disabled or no retrieval quality context was attached."
     risk_summary = _coalesce_dict(portfolio_risk.get("risk_summary")).get("message") or "Portfolio risk summary unavailable."
     sizing_body = _bullet_lines(
         [
@@ -232,6 +741,67 @@ def generate_weekly_trade_plan_report(
             for trade in selected_trades
         ]
     )
+    circuit_body = _bullet_lines(
+        [
+            f"Status: {circuit_breaker.get('circuit_status', 'N/A')}",
+            f"Loss streak: {circuit_breaker.get('rolling_loss_streak', 'N/A')}",
+            f"Recent win rate: {_fmt_num(circuit_breaker.get('recent_win_rate'))}%",
+            f"Recent expectancy: {_fmt_num(circuit_breaker.get('recent_expectancy_r'))}R",
+            f"Risk multiplier: {_fmt_num(circuit_breaker.get('max_allowed_risk_multiplier'))}",
+            *[f"Reason: {reason}" for reason in _coalesce_list(circuit_breaker.get("reasons"))],
+        ]
+    ) if circuit_breaker else "No circuit breaker context attached."
+    setup_decay_table = _coalesce_dict(setup_decay.get("setups"))
+    setup_decay_body = _bullet_lines(
+        [
+            f"{name}: status={item.get('status')}, sample={item.get('sample_size')}, expectancy={_fmt_num(item.get('recent_expectancy_r'))}R"
+            for name, item in setup_decay_table.items()
+            if isinstance(item, dict)
+        ]
+    ) if setup_decay_table else "No setup decay context attached."
+    scan_execution_body = _bullet_lines(
+        [
+            f"Duration seconds: {_fmt_num(scan_execution.get('duration_seconds'))}",
+            f"Total tickers: {scan_execution.get('total_tickers', 'N/A')}",
+            f"Completed tickers: {scan_execution.get('completed_tickers', 'N/A')}",
+            f"Failed tickers: {len(_coalesce_list(scan_execution.get('failed_tickers')))}",
+            f"Timed-out tickers: {len(_coalesce_list(scan_execution.get('timed_out_tickers')))}",
+            f"Partial results used: {scan_execution.get('partial_results_used', False)}",
+            *[f"Warning: {warning}" for warning in _coalesce_list(scan_execution.get("warnings"))],
+        ]
+    ) if scan_execution else "No scan execution summary attached."
+    pipeline_body = _bullet_lines(
+        [
+            f"Run id: {payload.get('run_id') or pipeline_run.get('run_id') or summary_payload.get('pipeline_run_id') or 'N/A'}",
+            f"Pipeline status: {pipeline_run.get('status', 'N/A')}",
+            f"Checkpoint count: {checkpoint_summary.get('count', summary_payload.get('checkpoint_count', 'N/A'))}",
+            f"Audit chain ok: {audit_status.get('ok', summary_payload.get('audit_chain_ok', 'N/A'))}",
+            f"Schema version: {schema_version.get('current_version', 'N/A')}",
+        ]
+    ) if (pipeline_run or checkpoint_summary or audit_status or payload.get("run_id") or summary_payload.get("pipeline_run_id")) else "No pipeline or audit summary attached."
+    startup_body = _bullet_lines(
+        [
+            f"Readiness: {startup_readiness.get('readiness', 'N/A')}",
+            f"Safe to run paper cycle: {startup_readiness.get('safe_to_run_paper_cycle', 'N/A')}",
+            f"Safe to run options: {startup_readiness.get('safe_to_run_options', 'N/A')}",
+            *[f"Warning: {warning}" for warning in _coalesce_list(startup_readiness.get("warnings"))[:5]],
+            *[f"Blocking/error: {error}" for error in _coalesce_list(startup_readiness.get("errors"))[:5]],
+        ]
+    ) if startup_readiness else "No startup readiness summary attached."
+    gemini_issues = _coalesce_list(gemini_validation.get("issues"))
+    gemini_body = _bullet_lines(
+        [
+            f"Validation status: {gemini_validation.get('validation_status', 'N/A')}",
+            f"Safe to show user: {gemini_validation.get('safe_to_show_user', 'N/A')}",
+            f"Safe to log: {gemini_validation.get('safe_to_log', 'N/A')}",
+            f"Deterministic fallback used: {gemini_validation.get('deterministic_fallback_used', False)}",
+            *[
+                f"{issue.get('severity', 'issue')} {issue.get('code', 'unknown')}: {issue.get('message', '')}"
+                for issue in gemini_issues[:8]
+                if isinstance(issue, dict)
+            ],
+        ]
+    ) if gemini_validation else "No Gemini narrative validation was run for this report. Deterministic report content remains the source of truth."
     final_warning_body = _bullet_lines(
         [
             SIMULATION_WARNING,
@@ -241,14 +811,31 @@ def generate_weekly_trade_plan_report(
     )
 
     sections = [
-        _section("Market Regime", regime_summary, market_regime),
+        _section("Macro Risk", macro_body, macro_risk),
+        _section("Market Regime", regime_body, market_regime),
+        _section("Correlation And Concentration", concentration_body, concentration_summary),
+        _section("Technical Confirmation", technical_body, technical_confirmation_summary),
+        _section("SEC Filing Sentiment", filing_body, filing_summary or filing_evaluations),
+        _section("Short Interest And News Risk", research_risk_body, research_risk_summary or research_evaluations),
+        _section("Memory And Human Feedback", memory_body, {"memory_summary": memory_summary, "selected_trades": selected_trades}),
         _section("Selected Trades", selected_body, selected_trades),
         _section("Watchlist Alternatives", watchlist_body, watchlist),
         _section("Rejected Or Risk-Rejected", rejected_body, {"risk_rejected": risk_rejected, "rejected": rejected}),
         _section("Option Alternatives", option_body, selected_trades),
+        _section("Options IV And Greeks Risk", option_risk_body, option_risk_summary),
+        _section("Option Strategy Comparison", strategy_body, option_strategy_summary),
         _section("Portfolio Risk", risk_summary, portfolio_risk),
         _section("Position Sizing", sizing_body, selected_trades),
+        _section("Scan Execution", scan_execution_body, scan_execution),
+        _section("Startup Readiness", startup_body, startup_readiness),
+        _section("Gemini Validation", gemini_body, gemini_validation),
+        _section("Pipeline And Audit", pipeline_body, {"pipeline_run": pipeline_run, "checkpoint_summary": checkpoint_summary, "audit_status": audit_status}),
+        _stress_test_section(stress_test_summary),
+        *_performance_diagnostics_sections(performance_diagnostics),
+        _section("Circuit Breaker", circuit_body, circuit_breaker),
+        _section("Setup Decay", setup_decay_body, setup_decay),
         _section("Research And Memory Notes", notes_body, selected_trades),
+        _scheduled_ops_section(job_history, alert_summary),
         _section("Final Warnings", final_warning_body, {"warnings": warnings}),
     ]
     summary = payload.get("summary", {}).get("message") or f"Weekly plan includes {len(selected_trades)} selected trades."
@@ -638,6 +1225,35 @@ def generate_full_paper_trading_report(
         warnings.append(trade_reviews.get("error", "Failed to load trade reviews."))
         trade_reviews = {"ok": False, "reviews": [], "count": 0}
 
+    job_history = list_job_runs(db_path=db_path, limit=20)
+    if not job_history.get("ok"):
+        missing.append("job_history")
+        warnings.append(job_history.get("error", "Failed to load scheduled job history."))
+        job_history = {}
+
+    alert_summary = list_alerts(db_path=db_path, limit=20)
+    if not alert_summary.get("ok"):
+        missing.append("alert_summary")
+        warnings.append(alert_summary.get("error", "Failed to load alert summary."))
+        alert_summary = {}
+
+    trade_history = get_trade_history(db_path=db_path)
+    if isinstance(trade_history, dict) and trade_history.get("ok") is False:
+        missing.append("trade_history")
+        warnings.append(trade_history.get("error", "Failed to load trade history."))
+        trade_history = []
+    candidate_history = get_candidate_decision_history(db_path=db_path)
+    if isinstance(candidate_history, dict) and candidate_history.get("ok") is False:
+        missing.append("candidate_history")
+        warnings.append(candidate_history.get("error", "Failed to load candidate history."))
+        candidate_history = []
+    performance_diagnostics = {
+        "performance_attribution": analyze_paper_trade_performance(trade_history if isinstance(trade_history, list) else []),
+        "setup_diagnostics": diagnose_strategy_health(trade_history if isinstance(trade_history, list) else []),
+        "filter_attribution": analyze_filter_attribution(candidate_history if isinstance(candidate_history, list) else [], trades=trade_history if isinstance(trade_history, list) else []),
+        "trade_error_analysis": analyze_trade_errors(trade_history if isinstance(trade_history, list) else []),
+    }
+
     sections = [
         _section(
             "Open Recommendations",
@@ -681,12 +1297,51 @@ def generate_full_paper_trading_report(
             ),
             trade_reviews,
         ),
+        *_performance_diagnostics_sections(performance_diagnostics),
+        _scheduled_ops_section(job_history, alert_summary),
     ]
     summary = "Full paper-trading report consolidates open trades, performance, and post-trade reviews from SQLite."
     return _finalize_report(
         report_type="full_paper_trading",
         fmt=format,
         title="Full Paper Trading Report",
+        summary=summary,
+        sections=sections,
+        missing_sections=missing,
+        warnings=warnings,
+    )
+
+
+def generate_performance_diagnostics_report(
+    db_path: str = "strategy_library.db",
+    format: str = "markdown",
+) -> dict:
+    warnings = [SIMULATION_WARNING]
+    missing: list[str] = []
+    trade_history = get_trade_history(db_path=db_path)
+    if isinstance(trade_history, dict) and trade_history.get("ok") is False:
+        missing.append("trade_history")
+        warnings.append(trade_history.get("error", "Failed to load trade history."))
+        trade_history = []
+    candidate_history = get_candidate_decision_history(db_path=db_path)
+    if isinstance(candidate_history, dict) and candidate_history.get("ok") is False:
+        missing.append("candidate_history")
+        warnings.append(candidate_history.get("error", "Failed to load candidate history."))
+        candidate_history = []
+    diagnostics = {
+        "performance_attribution": analyze_paper_trade_performance(trade_history if isinstance(trade_history, list) else []),
+        "setup_diagnostics": diagnose_strategy_health(trade_history if isinstance(trade_history, list) else []),
+        "filter_attribution": analyze_filter_attribution(candidate_history if isinstance(candidate_history, list) else [], trades=trade_history if isinstance(trade_history, list) else []),
+        "trade_error_analysis": analyze_trade_errors(trade_history if isinstance(trade_history, list) else []),
+    }
+    sections = _performance_diagnostics_sections(diagnostics)
+    if not sections:
+        missing.append("performance_diagnostics")
+    summary = "Performance diagnostics analyze simulated paper trades only; they do not represent live brokerage performance."
+    return _finalize_report(
+        report_type="performance_diagnostics",
+        fmt=format,
+        title="Paper Performance Diagnostics",
         summary=summary,
         sections=sections,
         missing_sections=missing,

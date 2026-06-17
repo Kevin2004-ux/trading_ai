@@ -1,9 +1,11 @@
 import sqlite3
 
 from tracking.trade_logger import (
+    get_candidate_decision_history,
     get_open_recommendations,
     get_recommendation,
     get_strategy_performance,
+    get_trade_history,
     get_win_loss_record,
     init_trade_tracking_db,
     log_candidate_evaluation,
@@ -33,6 +35,11 @@ def test_init_trade_tracking_db_creates_tables(tmp_path):
     assert "scanner_runs" in table_names
     assert "candidate_evaluations" in table_names
     assert "trade_outcomes" in table_names
+    assert "schema_migrations" in table_names
+    assert "pipeline_runs" in table_names
+    assert "pipeline_checkpoints" in table_names
+    assert "audit_events" in table_names
+    assert result["migration_result"]["ok"] is True
 
 
 def test_trade_logger_workflow(tmp_path):
@@ -139,3 +146,14 @@ def test_trade_logger_workflow(tmp_path):
     assert performance["overall"]["total_recommendations"] == 1
     assert performance["by_strategy"][0]["strategy"] == "swing_breakout_v1"
     assert round(performance["by_strategy"][0]["average_realized_return"], 2) == 8.0
+
+    trade_history = get_trade_history(db_path=db_path)
+    assert len(trade_history) == 1
+    assert trade_history[0]["latest_outcome"] == "win"
+    assert trade_history[0]["latest_grading_data_json"]["bars_held"] == 5
+
+    candidate_history = get_candidate_decision_history(db_path=db_path)
+    assert len(candidate_history) == 1
+    assert candidate_history[0]["ticker"] == "AAPL"
+    assert candidate_history[0]["metrics_json"]["rsi"] == 58.2
+    assert candidate_history[0]["scanner_config_json"]["min_rr"] == 2.0

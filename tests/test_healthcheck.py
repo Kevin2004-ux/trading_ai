@@ -23,6 +23,10 @@ def test_check_environment_returns_package_env_and_database_sections(monkeypatch
     assert "fastapi" in result["packages"]
     assert result["env_vars"]["GEMINI_API_KEY"] == "missing"
     assert result["database"]["ok"] is True
+    assert "startup_readiness" in result
+    assert "database_readiness" in result
+    assert "provider_config_readiness" in result
+    assert "options_blocked_status" in result
     assert result["app"]["ok"] is True
     assert result["cli"]["ok"] is True
 
@@ -109,3 +113,4 @@ def test_healthcheck_reports_ibkr_provider_config(monkeypatch, tmp_path):
     assert result["ibkr"]["read_only"] == "true"
     assert result["ibkr"]["use_delayed_data"] == "true"
     assert result["ibkr"]["ib_insync_available"] is True
+    assert result["startup_readiness"]["categories"]["ibkr_safe_mode"]["ok"] is True

@@ -242,6 +242,7 @@ def normalize_options_chain(raw_chain: list[dict] | dict) -> list[dict]:
         open_interest = _safe_float(item.get("open_interest"))
         implied_volatility = _safe_float(item.get("implied_volatility") or item.get("iv"))
         iv_rank = _safe_float(item.get("iv_rank"))
+        iv_percentile = _safe_float(item.get("iv_percentile"))
 
         normalized_option = {
             "ticker": str(option_contract or "").upper(),
@@ -259,10 +260,12 @@ def normalize_options_chain(raw_chain: list[dict] | dict) -> list[dict]:
             "open_interest": open_interest,
             "implied_volatility": implied_volatility,
             "iv_rank": iv_rank,
+            "iv_percentile": iv_percentile,
             "delta": _safe_float(item.get("delta") if item.get("delta") is not None else greeks.get("delta")),
             "gamma": _safe_float(item.get("gamma") if item.get("gamma") is not None else greeks.get("gamma")),
             "theta": _safe_float(item.get("theta") if item.get("theta") is not None else greeks.get("theta")),
             "vega": _safe_float(item.get("vega") if item.get("vega") is not None else greeks.get("vega")),
+            "rho": _safe_float(item.get("rho") if item.get("rho") is not None else greeks.get("rho")),
             "spread_percent": _safe_float(item.get("spread_percent")),
             "breakeven_price": _safe_float(item.get("breakeven_price")),
             "breakeven_move_percent": _safe_float(item.get("breakeven_move_percent")),

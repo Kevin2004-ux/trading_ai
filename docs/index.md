@@ -1,12 +1,13 @@
-# TRADING_AI Quant Platform
+# Trading AI Documentation
 
-Welcome to the documentation for the TRADING_AI project.
+Trading AI is a deterministic paper-trading research system. It does not place real brokerage orders.
 
-## Project Goal
+Start here:
 
-The primary goal of this system is to leverage multiple AI models and data sources to generate actionable trading ideas for both stocks and options.
+- `../README.md`: Project overview, setup, and common commands.
+- `RUNBOOK.md`: Local operations, diagnostics, paper workflows, reports, jobs, and troubleshooting.
+- `SAFETY.md`: Safety boundaries and deterministic guardrails.
+- `ARCHITECTURE.md`: Pipeline and module map.
+- `CLI_REFERENCE.md`: Command reference.
 
-## Key Components
-* **Data Ingestion:** Fetches data from Polygon.
-* **Modeling:** Uses Swing and Options policies.
-* **Documentation:** You're looking at it!
+Core principle: SQLite and deterministic constraints are the source of truth. Gemini, Pinecone memory, reports, and alerts can explain or summarize, but they cannot override hard gates.

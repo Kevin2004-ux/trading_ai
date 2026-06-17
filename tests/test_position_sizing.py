@@ -116,3 +116,45 @@ def test_calculate_position_size_dispatches_by_asset_type():
 
     assert stock["asset_type"] == "stock"
     assert option["asset_type"] == "option"
+
+
+def test_combined_risk_multipliers_adjust_stock_position_size():
+    result = calculate_stock_position_size(
+        _stock_trade(),
+        account_size=10000.0,
+        risk_mode="normal",
+        config={
+            "risk_multipliers": {
+                "circuit_breaker": 0.5,
+                "macro": 0.75,
+                "market_regime": 0.5,
+                "concentration": 0.5,
+            },
+            "risk_multiplier_reasons": ["Reduced risk test."],
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["original_position_sizing"]["shares"] == 20
+    assert result["shares"] == 1
+    assert result["combined_risk_multiplier"] == 0.09375
+    assert result["estimated_max_loss"] == 5.0
+    assert "Reduced risk test." in result["warnings"]
+
+
+def test_technical_confirmation_multiplier_is_preserved_in_breakdown():
+    result = calculate_stock_position_size(
+        _stock_trade(),
+        account_size=10000.0,
+        risk_mode="normal",
+        config={
+            "risk_multipliers": {
+                "technical_confirmation": 0.5,
+            },
+            "risk_multiplier_reasons": ["Technical confirmation warning."],
+        },
+    )
+
+    assert result["original_position_sizing"]["shares"] == 20
+    assert result["shares"] == 10
+    assert result["risk_multipliers"]["technical_confirmation"] == 0.5

@@ -39,6 +39,7 @@ from paper.paper_trader import (
 from reports.report_generator import (
     generate_full_paper_trading_report,
     generate_open_trade_review_report,
+    generate_performance_diagnostics_report,
     generate_performance_report,
     generate_post_trade_review_report,
     generate_ticker_research_memo,
@@ -443,6 +444,8 @@ def generate_report_tool(
             result = generate_post_trade_review_report(payload.get("reviews", payload), format=format)
         elif normalized_type == "full_paper_trading":
             result = generate_full_paper_trading_report(db_path=db_path, format=format)
+        elif normalized_type == "performance_diagnostics":
+            result = generate_performance_diagnostics_report(db_path=db_path, format=format)
         else:
             return _response("generate_report_tool", False, error=f"Unsupported report_type: {report_type}")
 
@@ -876,6 +879,18 @@ def run_trading_brain_tool(
         else:
             return _response("run_trading_brain_tool", False, error=f"Unsupported mode: {mode}")
 
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault(
+                "gemini_validation",
+                {
+                    "available": True,
+                    "validation_status": "not_run",
+                    "deterministic_fallback_used": False,
+                    "gemini_called": False,
+                    "note": "Gemini is only an explanation layer; deterministic trading-brain output remains source of truth.",
+                },
+            )
         return _response("run_trading_brain_tool", bool(result.get("ok")), data=result, error=None if result.get("ok") else result.get("errors", [result.get("error", "Trading brain failed.")])[0] if isinstance(result.get("errors"), list) and result.get("errors") else result.get("error", "Trading brain failed."))
     except Exception as exc:
         return _response("run_trading_brain_tool", False, error=f"Failed to run trading brain: {exc}")

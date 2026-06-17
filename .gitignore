@@ -1,5 +1,7 @@
 # Environment files
 .env
+.env.*
+!.env.example
 /.venv/
 /venv/
 /trading_env/
@@ -7,12 +9,23 @@
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Local data and model files
 *.pth
 *.parquet
 *.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
 /mlruns/
+strategy_library.db
+strategy_library.db-*
 
 # IDE and OS specific
 .vscode/

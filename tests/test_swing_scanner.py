@@ -3,6 +3,7 @@ import sqlite3
 from scanner.swing_scanner import (
     build_stock_candidate,
     calculate_trade_levels,
+    scan_multi_strategy_candidates,
     scan_swing_candidates,
 )
 
@@ -70,6 +71,20 @@ def _market_snapshot(
     }
 
 
+def _bars(start: float = 80.0, count: int = 120) -> list[dict]:
+    return [
+        {
+            "timestamp": f"2026-01-{(index % 28) + 1:02d}T00:00:00+00:00",
+            "open": start + index * 0.3,
+            "high": start + index * 0.3 + 1,
+            "low": start + index * 0.3 - 1,
+            "close": start + index * 0.3,
+            "volume": 2_000_000,
+        }
+        for index in range(count)
+    ]
+
+
 def test_scanner_handles_empty_ticker_list():
     result = scan_swing_candidates([])
 
@@ -123,6 +138,24 @@ def test_strong_ticker_passes_and_is_ranked(monkeypatch, tmp_path):
     assert result["passed_candidates"][0]["ticker"] == "AAPL"
     assert result["passed_candidates"][0]["rank"] == 1
     assert result["passed_candidates"][0]["recommendation_status"] in {"recommendable", "watchlist"}
+
+
+def test_scanner_includes_technical_confirmation_summary(monkeypatch, tmp_path):
+    snapshot = _market_snapshot("AAPL")
+    snapshot["data"]["bars"] = _bars()
+
+    monkeypatch.setattr(
+        "scanner.swing_scanner.get_market_snapshot",
+        lambda ticker, lookback_days=180: snapshot,
+    )
+
+    result = scan_swing_candidates(["AAPL"], db_path=str(tmp_path / "scanner.db"))
+    candidate = (result["passed_candidates"] or result["rejected_candidates"])[0]
+
+    assert "volume_profile_confirmation" in candidate
+    assert "timeframe_confirmation" in candidate
+    assert "technical_confirmation_summary" in candidate
+    assert candidate["technical_confirmation_summary"]["status"] in {"confirmed", "neutral", "warning", "rejected"}
 
 
 def test_weak_ticker_is_rejected_and_logged(monkeypatch, tmp_path):
@@ -201,3 +234,179 @@ def test_scan_logs_scanner_run_and_candidate_evaluations(monkeypatch, tmp_path):
     assert scanner_run_count == 1
     assert candidate_count == 3
     assert totals == (3, 2, 1)
+
+
+def test_multi_strategy_scan_fetches_failed_ticker_once_and_returns_json(monkeypatch, tmp_path):
+    calls = {"BRK.B": 0, "AAPL": 0}
+
+    def fake_market_snapshot(ticker, lookback_days=180):
+        calls[ticker] = calls.get(ticker, 0) + 1
+        if ticker == "BRK.B":
+            return {
+                "ok": False,
+                "ticker": ticker,
+                "source": "ibkr",
+                "data": None,
+                "error": "IBKR could not qualify stock contract for BRK.B using symbol BRK B.",
+                "error_type": "symbol",
+            }
+        return _market_snapshot(ticker)
+
+    monkeypatch.setattr("scanner.swing_scanner.get_market_snapshot", fake_market_snapshot)
+
+    result = scan_multi_strategy_candidates(
+        ["BRK.B", "AAPL"],
+        profiles=["momentum_breakout", "trend_pullback"],
+        db_path=str(tmp_path / "scanner.db"),
+    )
+
+    assert result["ok"] is True
+    assert calls["BRK.B"] == 1
+    assert calls["AAPL"] == 1
+    assert result["total_tickers_scanned"] == 2
+    assert result["scan_execution_summary"]["total_tickers"] == 2
+    assert result["scan_execution_summary"]["completed_tickers"] == 2
+    assert any(candidate["ticker"] == "BRK.B" for candidate in result["rejected_candidates"])
+    assert result["data_quality_summary"]["counts"]["unavailable"] >= 1
+
+
+def test_multi_strategy_scan_preserves_schema_with_async_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "scanner.swing_scanner.run_async_scan_tickers",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "completed": False,
+            "total_tickers": 2,
+            "completed_tickers": 1,
+            "failed_tickers": ["BAD"],
+            "timed_out_tickers": [],
+            "results": [
+                {"ok": True, "ticker": "AAPL", "result": _market_snapshot("AAPL")},
+                {"ok": False, "ticker": "BAD", "error_type": "market_data", "error": "Provider failed."},
+            ],
+            "errors": [{"ticker": "BAD", "type": "failure", "message": "Provider failed."}],
+            "warnings": ["Scan completed with partial results due to timeout or provider failures."],
+            "duration_seconds": 0.2,
+        },
+    )
+
+    result = scan_multi_strategy_candidates(
+        ["AAPL", "BAD"],
+        profiles=["momentum_breakout"],
+        db_path=str(tmp_path / "scanner.db"),
+    )
+
+    assert result["ok"] is True
+    assert result["scan_execution_summary"]["partial_results_used"] is True
+    assert result["scan_execution_summary"]["failed_tickers"] == ["BAD"]
+    assert any(candidate["ticker"] == "BAD" for candidate in result["rejected_candidates"])
+    assert "best_candidates" in result
+    assert "watchlist_candidates" in result
+
+
+def test_multi_strategy_scan_blocks_stale_fallback(monkeypatch, tmp_path):
+    stale_snapshot = _market_snapshot("WMT")
+    stale_snapshot["data"]["quote"]["quote_source"] = "historical_bar_fallback"
+    stale_snapshot["data"]["quote_fallback_used"] = True
+    stale_snapshot["data"]["data_freshness"]["age_days"] = 10
+    stale_snapshot["data"]["data_freshness"]["is_stale"] = True
+    stale_snapshot["data"]["data_quality"] = {
+        "ok": False,
+        "quality_label": "poor",
+        "price_source": "historical_bar_fallback",
+        "quote_status": "unavailable",
+        "final_recommendation_allowed": False,
+        "warnings": ["IBKR live quote unavailable; using latest historical close."],
+        "errors": ["Latest historical bar is stale."],
+    }
+
+    monkeypatch.setattr("scanner.swing_scanner.get_market_snapshot", lambda ticker, lookback_days=180: stale_snapshot)
+
+    result = scan_multi_strategy_candidates(
+        ["WMT"],
+        profiles=["momentum_breakout"],
+        db_path=str(tmp_path / "scanner.db"),
+    )
+
+    assert result["total_recommendable"] == 0
+    assert result["total_watchlist"] == 0
+    assert result["rejected_candidates"][0]["failed_constraints"] == ["data_quality"]
+    assert "stale" in result["rejected_candidates"][0]["rejection_reason"].lower()
+
+
+def test_sec_filing_critical_risk_rejects_candidate(monkeypatch, tmp_path):
+    monkeypatch.setattr("scanner.swing_scanner.get_market_snapshot", lambda ticker, lookback_days=180: _market_snapshot(ticker))
+    monkeypatch.setattr(
+        "scanner.swing_scanner.fetch_recent_filings",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "filings": [
+                {
+                    "accession_number": "0001",
+                    "form": "8-K",
+                    "filing_date": "2026-06-01",
+                    "description": "Non-reliance and restatement of prior financial statements",
+                    "items": ["4.02"],
+                    "filing_url": None,
+                }
+            ],
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+    result = scan_swing_candidates(
+        ["AAPL"],
+        db_path=str(tmp_path / "scanner.db"),
+        config={"sec_research_enabled": True},
+    )
+
+    assert result["total_passed"] == 0
+    assert result["total_rejected"] == 1
+    candidate = result["rejected_candidates"][0]
+    assert candidate["filing_sentiment"]["trade_impact"] == "blocking"
+    assert "critical_filing_risk" in candidate["failed_constraints"]
+
+
+def test_extreme_short_interest_downgrades_weak_long_candidate(monkeypatch, tmp_path):
+    weak_snapshot = _market_snapshot("AAPL", current_price=116.0, high_20=140.0, relative_volume=0.9)
+    monkeypatch.setattr("scanner.swing_scanner.get_market_snapshot", lambda ticker, lookback_days=180: weak_snapshot)
+
+    result = scan_swing_candidates(
+        ["AAPL"],
+        db_path=str(tmp_path / "scanner.db"),
+        config={
+            "short_data": {"AAPL": {"short_interest_percent_float": 32.0, "days_to_cover": 8.0}},
+            "short_interest_enabled": True,
+        },
+    )
+
+    candidate = (result["passed_candidates"] or result["rejected_candidates"])[0]
+    assert candidate["short_interest"]["short_interest_level"] == "extreme"
+    assert candidate["short_interest"]["trade_impact"] == "caution"
+    assert candidate["recommendation_status"] in {"watchlist", "rejected"}
+
+
+def test_critical_news_risk_rejects_candidate(monkeypatch, tmp_path):
+    monkeypatch.setattr("scanner.swing_scanner.get_market_snapshot", lambda ticker, lookback_days=180: _market_snapshot(ticker))
+    monkeypatch.setattr(
+        "scanner.swing_scanner.fetch_recent_news",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "available": True,
+            "articles": [{"headline": "AAPL announces accounting issue and restatement", "summary": ""}],
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+    result = scan_swing_candidates(
+        ["AAPL"],
+        db_path=str(tmp_path / "scanner.db"),
+        config={"news_research_enabled": True},
+    )
+
+    assert result["total_passed"] == 0
+    candidate = result["rejected_candidates"][0]
+    assert candidate["news_sentiment"]["trade_impact"] == "blocking"
+    assert "critical_news_risk" in candidate["failed_constraints"]

@@ -69,6 +69,46 @@ def _chain_result(ticker: str) -> dict:
                     "theta": -0.05,
                     "vega": 0.09,
                 },
+                {
+                    "option_contract": f"{ticker}P115",
+                    "underlying_ticker": ticker,
+                    "option_type": "put",
+                    "strike": 115.0,
+                    "expiration": "2026-07-03",
+                    "days_to_expiration": 26,
+                    "bid": 2.8,
+                    "ask": 3.0,
+                    "mid": 2.9,
+                    "last": 2.9,
+                    "volume": 350,
+                    "open_interest": 1200,
+                    "implied_volatility": 0.34,
+                    "iv_rank": 36,
+                    "delta": -0.42,
+                    "gamma": 0.04,
+                    "theta": -0.04,
+                    "vega": 0.1,
+                },
+                {
+                    "option_contract": f"{ticker}P110",
+                    "underlying_ticker": ticker,
+                    "option_type": "put",
+                    "strike": 110.0,
+                    "expiration": "2026-07-03",
+                    "days_to_expiration": 26,
+                    "bid": 1.4,
+                    "ask": 1.6,
+                    "mid": 1.5,
+                    "last": 1.5,
+                    "volume": 300,
+                    "open_interest": 1100,
+                    "implied_volatility": 0.34,
+                    "iv_rank": 36,
+                    "delta": -0.28,
+                    "gamma": 0.03,
+                    "theta": -0.03,
+                    "vega": 0.08,
+                },
             ],
         },
         "error": None,
@@ -92,6 +132,14 @@ def test_scan_options_for_stock_candidate_returns_best_and_rejected_contracts(mo
     assert "mispricing_label" in best
     assert "mispricing_score" in best
     assert "mispricing_context" in best
+    assert "iv_context" in best
+    assert "greeks_monitoring" in best
+    assert "option_trade_risk" in best
+    assert best["options_research_status"] == "paper_eligible"
+    assert result["option_risk_summary"]["approved_count"] == 1
+    assert result["option_strategy_candidates"]
+    assert result["selected_option_strategy"] is not None
+    assert "option_strategy_summary" in result
 
 
 def test_scan_options_for_weekly_selection_handles_multiple_stock_candidates(monkeypatch):
@@ -109,6 +157,8 @@ def test_scan_options_for_weekly_selection_handles_multiple_stock_candidates(mon
     assert result["summary"]["tickers_evaluated"] == 2
     assert len(result["results"]) == 2
     assert len(result["best_option_candidates"]) == 2
+    assert result["summary"]["option_risk_summary"]["approved_count"] == 2
+    assert result["summary"]["option_strategy_summary"]["strategy_count"] >= 2
 
 
 def test_scan_options_for_stock_candidate_handles_unavailable_chain(monkeypatch):

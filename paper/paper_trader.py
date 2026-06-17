@@ -6,7 +6,19 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agent.trading_brain import monitor_open_trades, run_weekly_trade_hunt
+from analytics.setup_decay import evaluate_all_setup_decay
+from config.startup_validator import validate_startup_config
+from db.audit_log import append_audit_event, verify_audit_chain
+from db.checkpoints import (
+    complete_pipeline_run,
+    fail_pipeline_run,
+    get_pipeline_run,
+    list_checkpoints,
+    record_checkpoint,
+    start_pipeline_run,
+)
 from journal.trade_journal import review_closed_trades
+from risk.circuit_breaker import evaluate_drawdown_circuit_breaker
 from tracking.trade_logger import init_trade_tracking_db
 
 
@@ -16,6 +28,94 @@ TERMINAL_OUTCOMES = {"win", "loss", "expired", "manual_review"}
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_checkpoint(db_path: str, run_id: str | None, checkpoint_name: str, status: str, payload: dict | None = None, error: dict | None = None) -> dict:
+    if not run_id:
+        return {"ok": False, "warning": "No pipeline run id available."}
+    return record_checkpoint(db_path, run_id, checkpoint_name, status, payload=payload, error=error)
+
+
+def _safe_audit(db_path: str, event_type: str, payload: dict, run_id: str | None = None, entity_type: str | None = None, entity_id: str | None = None) -> dict:
+    return append_audit_event(
+        db_path=db_path,
+        event_type=event_type,
+        payload=payload,
+        run_id=run_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+    )
+
+
+def _append_observability_warning(warnings: list[str], result: dict, label: str) -> None:
+    if isinstance(result, dict) and not result.get("ok", False):
+        warnings.append(f"{label}: {result.get('error') or result.get('warning') or 'logging failed'}")
+
+
+def _audit_trade_hunt(db_path: str, run_id: str | None, trade_hunt: dict, warnings: list[str]) -> None:
+    if not run_id or not isinstance(trade_hunt, dict):
+        return
+
+    universe_result = trade_hunt.get("universe_result") if isinstance(trade_hunt.get("universe_result"), dict) else {}
+    scan_result = trade_hunt.get("scan_result") if isinstance(trade_hunt.get("scan_result"), dict) else {}
+    selection_result = trade_hunt.get("selection_result") if isinstance(trade_hunt.get("selection_result"), dict) else {}
+    decision_result = trade_hunt.get("decision_result") if isinstance(trade_hunt.get("decision_result"), dict) else {}
+    summary = trade_hunt.get("summary") if isinstance(trade_hunt.get("summary"), dict) else {}
+
+    events = [
+        ("universe_selected", {"universe": universe_result.get("universe"), "count": universe_result.get("count")}),
+        ("async_scan_completed", trade_hunt.get("scan_execution_summary") or summary.get("scan_execution_summary") or {}),
+        ("data_quality_summary", scan_result.get("data_quality_summary") or summary.get("data_quality") or {}),
+        ("macro_risk_evaluated", trade_hunt.get("macro_risk") or summary.get("macro_risk") or {}),
+        ("market_regime_evaluated", trade_hunt.get("market_regime") or {}),
+        ("correlation_snapshot_loaded", (trade_hunt.get("concentration_summary") or {}).get("snapshot") or {}),
+        ("concentration_risk_evaluated", trade_hunt.get("concentration_summary") or summary.get("concentration_summary") or {}),
+        ("volume_profile_evaluated", trade_hunt.get("technical_confirmation_summary") or summary.get("technical_confirmation_summary") or {}),
+        ("timeframe_confirmation_evaluated", trade_hunt.get("technical_confirmation_summary") or summary.get("technical_confirmation_summary") or {}),
+        ("sec_filings_loaded", trade_hunt.get("filing_sentiment_summary") or summary.get("filing_sentiment_summary") or {}),
+        ("filing_analysis_completed", trade_hunt.get("filing_sentiment_summary") or summary.get("filing_sentiment_summary") or {}),
+        ("earnings_8k_analyzed", trade_hunt.get("filing_sentiment_summary") or summary.get("filing_sentiment_summary") or {}),
+        ("filing_sentiment_evaluated", trade_hunt.get("filing_sentiment_summary") or summary.get("filing_sentiment_summary") or {}),
+        ("short_interest_evaluated", trade_hunt.get("research_risk_summary") or summary.get("research_risk_summary") or {}),
+        ("borrow_pressure_evaluated", trade_hunt.get("research_risk_summary") or summary.get("research_risk_summary") or {}),
+        ("recent_news_loaded", trade_hunt.get("research_risk_summary") or summary.get("research_risk_summary") or {}),
+        ("news_sentiment_evaluated", trade_hunt.get("research_risk_summary") or summary.get("research_risk_summary") or {}),
+        ("iv_context_evaluated", ((trade_hunt.get("option_research") or {}).get("option_risk_summary") if isinstance(trade_hunt.get("option_research"), dict) else {}) or {}),
+        ("greeks_evaluated", ((trade_hunt.get("option_research") or {}).get("option_risk_summary") if isinstance(trade_hunt.get("option_research"), dict) else {}) or {}),
+        ("option_trade_risk_evaluated", ((trade_hunt.get("option_research") or {}).get("option_risk_summary") if isinstance(trade_hunt.get("option_research"), dict) else {}) or {}),
+        ("option_strategies_built", ((trade_hunt.get("option_research") or {}).get("summary", {}).get("option_strategy_summary") if isinstance(trade_hunt.get("option_research"), dict) else {}) or {}),
+        ("option_strategy_evaluated", ((trade_hunt.get("option_research") or {}).get("summary", {}).get("option_strategy_summary") if isinstance(trade_hunt.get("option_research"), dict) else {}) or {}),
+        ("option_strategy_selected", ((trade_hunt.get("option_research") or {}).get("summary", {}).get("option_strategy_summary") if isinstance(trade_hunt.get("option_research"), dict) else {}) or {}),
+        ("portfolio_risk_evaluated", trade_hunt.get("portfolio_risk") or {}),
+        ("circuit_breaker_evaluated", summary.get("circuit_breaker") or {}),
+        ("setup_decay_evaluated", summary.get("setup_decay") or {}),
+    ]
+    for event_type, payload in events:
+        _append_observability_warning(warnings, _safe_audit(db_path, event_type, payload, run_id=run_id), event_type)
+
+    for candidate in scan_result.get("rejected_candidates", []) if isinstance(scan_result.get("rejected_candidates"), list) else []:
+        if isinstance(candidate, dict):
+            _append_observability_warning(
+                warnings,
+                _safe_audit(db_path, "candidate_rejected", {"ticker": candidate.get("ticker"), "reason": candidate.get("rejection_reason")}, run_id=run_id, entity_type="candidate", entity_id=str(candidate.get("ticker"))),
+                "candidate_rejected",
+            )
+    for candidate in selection_result.get("watchlist_alternatives", []) if isinstance(selection_result.get("watchlist_alternatives"), list) else []:
+        if isinstance(candidate, dict):
+            _append_observability_warning(warnings, _safe_audit(db_path, "candidate_watchlisted", candidate, run_id=run_id, entity_type="candidate", entity_id=str(candidate.get("ticker"))), "candidate_watchlisted")
+    for candidate in decision_result.get("final_recommendations", []) if isinstance(decision_result.get("final_recommendations"), list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        _append_observability_warning(warnings, _safe_audit(db_path, "candidate_selected", candidate, run_id=run_id, entity_type="candidate", entity_id=str(candidate.get("ticker"))), "candidate_selected")
+        if candidate.get("position_sizing"):
+            _append_observability_warning(warnings, _safe_audit(db_path, "position_sizing_calculated", candidate.get("position_sizing"), run_id=run_id, entity_type="candidate", entity_id=str(candidate.get("ticker"))), "position_sizing_calculated")
+        if candidate.get("paper_fill"):
+            _append_observability_warning(warnings, _safe_audit(db_path, "fill_model_applied", candidate.get("paper_fill"), run_id=run_id, entity_type="candidate", entity_id=str(candidate.get("ticker"))), "fill_model_applied")
+    for logged in decision_result.get("logged_recommendations", []) if isinstance(decision_result.get("logged_recommendations"), list) else []:
+        recommendation = logged.get("data", {}).get("recommendation") if isinstance(logged, dict) else None
+        if isinstance(recommendation, dict):
+            _append_observability_warning(warnings, _safe_audit(db_path, "final_recommendation_logged", {"recommendation_id": recommendation.get("id"), "ticker": recommendation.get("ticker")}, run_id=run_id, entity_type="recommendation", entity_id=str(recommendation.get("id"))), "final_recommendation_logged")
+
 
 
 def _deserialize_json(value: Any) -> Any:
@@ -215,7 +315,79 @@ def run_paper_trade_cycle(
     account_size: float = 10000.0,
     risk_mode: str = "normal",
     db_path: str = "strategy_library.db",
+    scan_max_concurrency: int = 5,
+    scan_ticker_timeout_seconds: float = 15.0,
+    scan_total_timeout_seconds: float = 180.0,
+    use_async_scan: bool = True,
+    startup_config: dict | None = None,
 ) -> dict:
+    observability_warnings: list[str] = []
+    validation_config = {
+        **(startup_config or {}),
+        "DATABASE_PATH": db_path,
+        "INCLUDE_OPTIONS": str(bool(include_options)).lower(),
+        "SCAN_MAX_CONCURRENCY": scan_max_concurrency,
+        "SCAN_TICKER_TIMEOUT_SECONDS": scan_ticker_timeout_seconds,
+        "SCAN_TOTAL_TIMEOUT_SECONDS": scan_total_timeout_seconds,
+    }
+    startup_readiness = validate_startup_config(validation_config)
+    pipeline_start = start_pipeline_run(
+        db_path,
+        "paper_cycle",
+        metadata={
+            "universe": universe,
+            "max_tickers": max_tickers,
+            "max_trades": max_trades,
+            "min_trades": min_trades,
+            "include_options": include_options,
+            "use_async_scan": use_async_scan,
+        },
+    )
+    run_id = pipeline_start.get("run_id") or (pipeline_start.get("pipeline_run") or {}).get("run_id")
+    _append_observability_warning(observability_warnings, pipeline_start, "start_pipeline_run")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "paper_cycle_started", "completed", payload={"universe": universe, "max_tickers": max_tickers}), "paper_cycle_started")
+    _append_observability_warning(observability_warnings, _safe_audit(db_path, "paper_cycle_started", {"universe": universe, "max_tickers": max_tickers}, run_id=run_id), "paper_cycle_started_audit")
+    if startup_readiness.get("ok"):
+        _append_observability_warning(observability_warnings, _safe_audit(db_path, "startup_validation_passed", startup_readiness, run_id=run_id), "startup_validation_passed_audit")
+    else:
+        _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "startup_validation_failed", "failed", error=startup_readiness), "startup_validation_failed")
+        _append_observability_warning(observability_warnings, _safe_audit(db_path, "startup_validation_failed", startup_readiness, run_id=run_id), "startup_validation_failed_audit")
+        pipeline_result = fail_pipeline_run(db_path, run_id, {"startup_readiness": startup_readiness}) if run_id else {"ok": False, "error": "No run id."}
+        checkpoint_summary = list_checkpoints(db_path, run_id) if run_id else {"ok": False, "checkpoints": [], "count": 0}
+        audit_status = verify_audit_chain(db_path)
+        return {
+            "ok": False,
+            "mode": PAPER_MODE,
+            "run_id": run_id,
+            "timestamp": _now_iso(),
+            "startup_readiness": startup_readiness,
+            "trade_hunt": None,
+            "pipeline_run": pipeline_result.get("pipeline_run") if isinstance(pipeline_result, dict) else None,
+            "checkpoint_summary": {
+                "ok": checkpoint_summary.get("ok"),
+                "count": checkpoint_summary.get("count", 0),
+                "checkpoints": checkpoint_summary.get("checkpoints", []),
+            },
+            "audit_status": audit_status,
+            "paper_trades_logged": [],
+            "summary": {
+                "selected_count": 0,
+                "logged_count": 0,
+                "failed_ticker_count": 0,
+                "failed_tickers": [],
+                "timed_out_ticker_count": 0,
+                "data_quality": None,
+                "scan_execution_summary": None,
+                "pipeline_run_id": run_id,
+                "checkpoint_count": checkpoint_summary.get("count", 0),
+                "audit_chain_ok": audit_status.get("ok"),
+                "startup_readiness": startup_readiness,
+                "message": "Paper trading cycle blocked by startup validation.",
+            },
+            "warning": "Paper trading is simulated only. No live brokerage orders were placed.",
+            "errors": list(startup_readiness.get("errors", [])) + observability_warnings,
+        }
+
     trade_hunt = run_weekly_trade_hunt(
         universe=universe,
         max_tickers=max_tickers,
@@ -236,8 +408,46 @@ def run_paper_trade_cycle(
         risk_mode=risk_mode,
         auto_log=True,
         db_path=db_path,
-        logging_metadata={"paper_trading": True, "execution_mode": PAPER_MODE, "mode": PAPER_MODE},
+        logging_metadata={"paper_trading": True, "execution_mode": PAPER_MODE, "mode": PAPER_MODE, "run_id": run_id},
+        scan_max_concurrency=scan_max_concurrency,
+        scan_ticker_timeout_seconds=scan_ticker_timeout_seconds,
+        scan_total_timeout_seconds=scan_total_timeout_seconds,
+        use_async_scan=use_async_scan,
     )
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "universe_loaded", "completed", payload=trade_hunt.get("universe_result") if isinstance(trade_hunt, dict) else None), "universe_loaded")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "async_scan_completed", "completed", payload=trade_hunt.get("scan_execution_summary") if isinstance(trade_hunt, dict) else None), "async_scan_completed")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "candidates_ranked", "completed", payload=trade_hunt.get("selection_result") if isinstance(trade_hunt, dict) else None), "candidates_ranked")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "macro_risk_evaluated", "completed", payload=trade_hunt.get("macro_risk") if isinstance(trade_hunt, dict) else None), "macro_risk_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "market_regime_evaluated", "completed", payload=trade_hunt.get("market_regime") if isinstance(trade_hunt, dict) else None), "market_regime_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "correlation_snapshot_loaded", "completed", payload=(trade_hunt.get("concentration_summary") or {}).get("snapshot") if isinstance(trade_hunt, dict) else None), "correlation_snapshot_loaded")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "concentration_risk_evaluated", "completed", payload=trade_hunt.get("concentration_summary") if isinstance(trade_hunt, dict) else None), "concentration_risk_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "volume_profile_evaluated", "completed", payload=trade_hunt.get("technical_confirmation_summary") if isinstance(trade_hunt, dict) else None), "volume_profile_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "timeframe_confirmation_evaluated", "completed", payload=trade_hunt.get("technical_confirmation_summary") if isinstance(trade_hunt, dict) else None), "timeframe_confirmation_evaluated")
+    filing_sentiment_summary = trade_hunt.get("filing_sentiment_summary") if isinstance(trade_hunt, dict) else None
+    if not isinstance(filing_sentiment_summary, dict) and isinstance(trade_hunt, dict):
+        filing_sentiment_summary = (trade_hunt.get("summary") or {}).get("filing_sentiment_summary")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "sec_filings_loaded", "completed", payload=filing_sentiment_summary), "sec_filings_loaded")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "filing_analysis_completed", "completed", payload=filing_sentiment_summary), "filing_analysis_completed")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "earnings_8k_analyzed", "completed", payload=filing_sentiment_summary), "earnings_8k_analyzed")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "filing_sentiment_evaluated", "completed", payload=filing_sentiment_summary), "filing_sentiment_evaluated")
+    research_risk_summary = trade_hunt.get("research_risk_summary") if isinstance(trade_hunt, dict) else None
+    if not isinstance(research_risk_summary, dict) and isinstance(trade_hunt, dict):
+        research_risk_summary = (trade_hunt.get("summary") or {}).get("research_risk_summary")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "short_interest_evaluated", "completed", payload=research_risk_summary), "short_interest_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "borrow_pressure_evaluated", "completed", payload=research_risk_summary), "borrow_pressure_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "recent_news_loaded", "completed", payload=research_risk_summary), "recent_news_loaded")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "news_sentiment_evaluated", "completed", payload=research_risk_summary), "news_sentiment_evaluated")
+    option_risk_summary = ((trade_hunt.get("option_research") or {}).get("option_risk_summary") if isinstance(trade_hunt, dict) and isinstance(trade_hunt.get("option_research"), dict) else None)
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "iv_context_evaluated", "completed", payload=option_risk_summary), "iv_context_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "greeks_evaluated", "completed", payload=option_risk_summary), "greeks_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "option_trade_risk_evaluated", "completed", payload=option_risk_summary), "option_trade_risk_evaluated")
+    option_strategy_summary = ((trade_hunt.get("option_research") or {}).get("summary", {}).get("option_strategy_summary") if isinstance(trade_hunt, dict) and isinstance(trade_hunt.get("option_research"), dict) else None)
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "option_strategies_built", "completed", payload=option_strategy_summary), "option_strategies_built")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "option_strategy_evaluated", "completed", payload=option_strategy_summary), "option_strategy_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "option_strategy_selected", "completed", payload=option_strategy_summary), "option_strategy_selected")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "portfolio_risk_evaluated", "completed", payload=trade_hunt.get("portfolio_risk") if isinstance(trade_hunt, dict) else None), "portfolio_risk_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "circuit_breaker_evaluated", "completed", payload=(trade_hunt.get("summary") or {}).get("circuit_breaker") if isinstance(trade_hunt, dict) else None), "circuit_breaker_evaluated")
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "final_selection_completed", "completed", payload=trade_hunt.get("decision_result") if isinstance(trade_hunt, dict) else None), "final_selection_completed")
 
     decision_result = trade_hunt.get("decision_result", {}) if isinstance(trade_hunt, dict) else {}
     logged_entries = decision_result.get("logged_recommendations", []) if isinstance(decision_result, dict) else []
@@ -249,25 +459,79 @@ def run_paper_trade_cycle(
 
     selected_count = len(decision_result.get("final_recommendations", [])) if isinstance(decision_result, dict) else 0
     logged_count = len(paper_trades_logged)
+    scan_result = trade_hunt.get("scan_result", {}) if isinstance(trade_hunt, dict) else {}
+    data_quality_summary = scan_result.get("data_quality_summary") if isinstance(scan_result, dict) else None
+    scan_execution_summary = trade_hunt.get("scan_execution_summary") if isinstance(trade_hunt, dict) else None
+    if not isinstance(scan_execution_summary, dict) and isinstance(scan_result, dict):
+        scan_execution_summary = scan_result.get("scan_execution_summary")
+    rejected_candidates = scan_result.get("rejected_candidates", []) if isinstance(scan_result, dict) and isinstance(scan_result.get("rejected_candidates"), list) else []
+    failed_tickers = {
+        str(candidate.get("ticker"))
+        for candidate in rejected_candidates
+        if isinstance(candidate, dict)
+        and isinstance(candidate.get("data_quality"), dict)
+        and candidate["data_quality"].get("quality_label") in {"poor", "unavailable"}
+    }
+    failed_ticker_count = len(failed_tickers)
     message = (
         "Paper trading cycle completed. Recommendations were logged as simulated trades only."
         if trade_hunt.get("ok")
         else "Paper trading cycle failed before simulated trades could be logged."
     )
+    summary_payload = {
+        "selected_count": selected_count,
+        "logged_count": logged_count,
+        "failed_ticker_count": failed_ticker_count,
+        "timed_out_ticker_count": len(scan_execution_summary.get("timed_out_tickers", [])) if isinstance(scan_execution_summary, dict) else 0,
+        "scan_execution_summary": scan_execution_summary,
+        "memory_summary": (trade_hunt.get("summary") or {}).get("memory_summary") if isinstance(trade_hunt, dict) else None,
+        "message": message,
+    }
+    _audit_trade_hunt(db_path, run_id, trade_hunt, observability_warnings)
+    _append_observability_warning(observability_warnings, _safe_checkpoint(db_path, run_id, "paper_logging_completed", "completed", payload={"logged_count": logged_count}), "paper_logging_completed")
+    if trade_hunt.get("ok"):
+        pipeline_result = complete_pipeline_run(db_path, run_id, summary_payload, status="completed") if run_id else {"ok": False, "error": "No run id."}
+        _append_observability_warning(observability_warnings, _safe_audit(db_path, "paper_cycle_completed", summary_payload, run_id=run_id), "paper_cycle_completed_audit")
+    else:
+        pipeline_result = fail_pipeline_run(db_path, run_id, {"errors": trade_hunt.get("errors", [])}) if run_id else {"ok": False, "error": "No run id."}
+        _append_observability_warning(observability_warnings, _safe_audit(db_path, "paper_cycle_failed", {"errors": trade_hunt.get("errors", [])}, run_id=run_id), "paper_cycle_failed_audit")
+    _append_observability_warning(observability_warnings, pipeline_result, "complete_pipeline_run")
+    checkpoint_summary = list_checkpoints(db_path, run_id) if run_id else {"ok": False, "checkpoints": []}
+    audit_status = verify_audit_chain(db_path)
+    pipeline_run = get_pipeline_run(db_path, run_id) if run_id else pipeline_result
 
     return {
         "ok": bool(trade_hunt.get("ok")),
         "mode": PAPER_MODE,
+        "run_id": run_id,
         "timestamp": _now_iso(),
+        "startup_readiness": startup_readiness,
         "trade_hunt": trade_hunt,
+        "pipeline_run": pipeline_run.get("pipeline_run") if isinstance(pipeline_run, dict) else None,
+        "checkpoint_summary": {
+            "ok": checkpoint_summary.get("ok"),
+            "count": checkpoint_summary.get("count", 0),
+            "checkpoints": checkpoint_summary.get("checkpoints", []),
+        },
+        "audit_status": audit_status,
         "paper_trades_logged": paper_trades_logged,
         "summary": {
             "selected_count": selected_count,
             "logged_count": logged_count,
+            "failed_ticker_count": failed_ticker_count,
+            "failed_tickers": sorted(failed_tickers),
+            "timed_out_ticker_count": len(scan_execution_summary.get("timed_out_tickers", [])) if isinstance(scan_execution_summary, dict) else 0,
+            "data_quality": data_quality_summary,
+            "scan_execution_summary": scan_execution_summary,
+            "memory_summary": summary_payload.get("memory_summary"),
+            "pipeline_run_id": run_id,
+            "checkpoint_count": checkpoint_summary.get("count", 0),
+            "audit_chain_ok": audit_status.get("ok"),
+            "startup_readiness": startup_readiness,
             "message": message,
         },
         "warning": "Paper trading is simulated only. No live brokerage orders were placed.",
-        "errors": trade_hunt.get("errors", []) if isinstance(trade_hunt, dict) else ["Paper trading cycle failed."],
+        "errors": (trade_hunt.get("errors", []) if isinstance(trade_hunt, dict) else ["Paper trading cycle failed."]) + list(startup_readiness.get("warnings", [])) + observability_warnings,
     }
 
 
@@ -368,5 +632,38 @@ def get_paper_trading_summary(
             "best_setup_type": None,
             "worst_setup_type": None,
             "warning": "This is simulated paper-trading performance, not live brokerage P/L.",
+            "errors": [str(exc)],
+        }
+
+
+def get_paper_risk_diagnostics(
+    db_path: str = "strategy_library.db",
+) -> dict:
+    try:
+        recommendations = _load_paper_recommendations(db_path)
+        open_paper_trades = _paper_open_trades(recommendations)
+        circuit_breaker = evaluate_drawdown_circuit_breaker(recommendations, open_trades=open_paper_trades)
+        setup_decay = evaluate_all_setup_decay(recommendations)
+        return {
+            "ok": True,
+            "mode": PAPER_MODE,
+            "timestamp": _now_iso(),
+            "circuit_breaker": circuit_breaker,
+            "setup_decay": setup_decay,
+            "open_paper_trades_count": len(open_paper_trades),
+            "closed_paper_trades_count": len(_paper_closed_trades(recommendations)),
+            "warnings": circuit_breaker.get("warnings", []) + setup_decay.get("warnings", []),
+            "errors": [],
+        }
+    except sqlite3.Error as exc:
+        return {
+            "ok": False,
+            "mode": PAPER_MODE,
+            "timestamp": _now_iso(),
+            "circuit_breaker": None,
+            "setup_decay": None,
+            "open_paper_trades_count": 0,
+            "closed_paper_trades_count": 0,
+            "warnings": [],
             "errors": [str(exc)],
         }

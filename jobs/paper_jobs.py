@@ -72,6 +72,10 @@ def run_weekly_paper_cycle_job(
     account_size: float = 10000.0,
     risk_mode: str = "normal",
     db_path: str = "strategy_library.db",
+    scan_max_concurrency: int = 5,
+    scan_ticker_timeout_seconds: float = 15.0,
+    scan_total_timeout_seconds: float = 180.0,
+    use_async_scan: bool = True,
 ) -> dict:
     try:
         result = run_paper_trade_cycle(
@@ -92,6 +96,10 @@ def run_weekly_paper_cycle_job(
             account_size=account_size,
             risk_mode=risk_mode,
             db_path=db_path,
+            scan_max_concurrency=scan_max_concurrency,
+            scan_ticker_timeout_seconds=scan_ticker_timeout_seconds,
+            scan_total_timeout_seconds=scan_total_timeout_seconds,
+            use_async_scan=use_async_scan,
         )
         return _build_job_response("weekly_paper_cycle", "paper_cycle", result)
     except Exception as exc:

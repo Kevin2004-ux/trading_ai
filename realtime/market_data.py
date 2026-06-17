@@ -9,6 +9,7 @@ import requests
 
 import config
 from providers.market_data_provider import is_ibkr_market_data_provider
+from quality.data_quality import validate_market_data_quality
 
 
 SOURCE_NAME = "polygon"
@@ -449,9 +450,14 @@ def get_market_snapshot(ticker: str, lookback_days: int = 180) -> dict:
     data = {
         "quote": quote_result["data"] if quote_result["ok"] else None,
         "quote_error": quote_result["error"],
+        "quote_status": "available" if quote_result["ok"] else "unavailable",
+        "quote_fallback_used": False,
         "bars": historical_result["data"]["bars"],
         "row_count": historical_result["data"]["row_count"],
         "technical_snapshot": technical_snapshot,
         "data_freshness": freshness,
+        "data_quality_warnings": [],
     }
-    return _response(True, ticker, data=data)
+    response = _response(True, ticker, data=data)
+    response["data"]["data_quality"] = validate_market_data_quality(response)
+    return response

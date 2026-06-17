@@ -1,12 +1,32 @@
 import sqlite3
+import json
+
+import pytest
 
 from agent.trading_brain import (
+    build_trade_decision,
     monitor_open_trades,
     review_ticker_opportunity,
     run_weekly_trade_hunt,
 )
 from tools.agent_tools import log_recommendation_tool
 from tracking.trade_logger import init_trade_tracking_db
+from memory.annotation_store import add_human_annotation
+
+
+@pytest.fixture(autouse=True)
+def _default_low_macro_risk(monkeypatch):
+    monkeypatch.setattr(
+        "agent.trading_brain.evaluate_macro_risk",
+        lambda: {
+            "ok": True,
+            "macro_risk_level": "low",
+            "risk_multiplier": 1.0,
+            "new_trades_allowed": True,
+            "warnings": [],
+            "reasons": [],
+        },
+    )
 
 
 def _candidate(
@@ -109,6 +129,12 @@ def _option_candidate(
         "mid": 3.9,
         "open_interest": 1600,
         "volume": 450,
+        "implied_volatility": 0.28,
+        "iv_rank": 18,
+        "delta": 0.52,
+        "gamma": 0.04,
+        "theta": -0.04,
+        "vega": 0.12,
         "spread_percent": 0.05,
         "risk_reward": risk_reward,
         "score": score,
@@ -130,6 +156,44 @@ def _option_candidate(
             "warnings": [],
             "explanation": "Attractive research value.",
         },
+        "iv_context": {
+            "ok": True,
+            "current_iv": 0.28,
+            "iv_rank": 18,
+            "iv_percentile": 22,
+            "iv_context": "cheap",
+            "trade_bias": "long_premium_favorable",
+            "warnings": [],
+            "errors": [],
+        },
+        "greeks_monitoring": {
+            "ok": True,
+            "contract": resolved_contract,
+            "delta": 0.52,
+            "gamma": 0.04,
+            "theta": -0.04,
+            "vega": 0.12,
+            "rho": None,
+            "greeks_quality": "good",
+            "risk_level": "low",
+            "warnings": [],
+            "errors": [],
+        },
+        "option_trade_risk": {
+            "ok": True,
+            "approved": True,
+            "status": "approved",
+            "iv_context": {"iv_context": "cheap", "iv_rank": 18, "iv_percentile": 22},
+            "greeks": {"greeks_quality": "good", "risk_level": "low"},
+            "spread_quality": "good",
+            "fill_quality": "good",
+            "days_to_expiration": 25,
+            "risk_multiplier": 1.0,
+            "reasons": [],
+            "warnings": [],
+            "errors": [],
+        },
+        "options_research_status": "paper_eligible",
     }
     candidate.update(overrides)
     return candidate
@@ -145,6 +209,101 @@ def _recommendable_constraints() -> dict:
         "rejection_reason": "",
         "config": {"minimum_risk_reward": 2.0},
     }
+
+
+def test_build_trade_decision_rejects_blocking_filing_sentiment(tmp_path):
+    candidate = _candidate("AAPL")
+    candidate["filing_sentiment"] = {
+        "ok": True,
+        "sentiment_label": "negative",
+        "filing_risk_level": "critical",
+        "trade_impact": "blocking",
+        "risk_multiplier": 0.0,
+        "score_adjustment": -30.0,
+        "reasons": ["Critical SEC filing risk blocks new paper recommendations."],
+        "warnings": [],
+    }
+
+    decision = build_trade_decision(candidate, db_path=str(tmp_path / "brain.db"), include_memory_context=False)
+
+    assert decision["decision"] == "reject"
+    assert decision["data_used"]["sec_filings"] is True
+    assert decision["filing_sentiment"]["trade_impact"] == "blocking"
+    assert any("Critical SEC filing risk" in risk for risk in decision["risks"])
+
+
+def test_build_trade_decision_rejects_critical_news_risk(tmp_path):
+    candidate = _candidate("AAPL")
+    candidate["news_sentiment"] = {
+        "ok": True,
+        "sentiment_label": "negative",
+        "headline_risk_level": "critical",
+        "trade_impact": "blocking",
+        "risk_multiplier": 0.0,
+        "score_adjustment": -30.0,
+        "risk_flags": ["restatement"],
+        "positive_flags": [],
+        "warnings": [],
+    }
+
+    decision = build_trade_decision(candidate, db_path=str(tmp_path / "brain.db"), include_memory_context=False)
+
+    assert decision["decision"] == "reject"
+    assert decision["data_used"]["news_sentiment"] is True
+    assert "restatement" in decision["risks"]
+
+
+def test_build_trade_decision_attaches_human_feedback_without_unblocking_rejected_candidate(tmp_path):
+    db_path = str(tmp_path / "memory_feedback.db")
+    add_human_annotation(
+        db_path=db_path,
+        entity_type="trade",
+        annotation_type="blocking",
+        ticker="AAPL",
+        setup_type="momentum_breakout",
+        label="blocking",
+        notes="Avoid this setup for now.",
+    )
+    candidate = _candidate("AAPL", recommendation_status="rejected", passed=False, risk_reward=1.2)
+
+    decision = build_trade_decision(candidate, db_path=db_path, include_memory_context=True)
+
+    assert decision["decision"] == "reject"
+    assert decision["human_feedback"]["feedback_status"] == "blocking"
+    assert decision["memory_context"]["memory_impact"]["trade_impact"] in {"blocking", "ignored"}
+    assert any("blocking" in risk.lower() for risk in decision["risks"])
+
+
+def test_build_trade_decision_combines_short_and_news_multipliers(tmp_path):
+    candidate = _candidate("AAPL")
+    candidate["short_interest"] = {
+        "ok": True,
+        "short_interest_level": "extreme",
+        "squeeze_risk": "high",
+        "trade_impact": "supportive",
+        "risk_multiplier": 0.85,
+        "score_adjustment": 4.0,
+        "reasons": ["Extreme short interest may support a squeeze setup."],
+        "warnings": [],
+    }
+    candidate["news_sentiment"] = {
+        "ok": True,
+        "sentiment_label": "negative",
+        "headline_risk_level": "high",
+        "trade_impact": "caution",
+        "risk_multiplier": 0.5,
+        "score_adjustment": -10.0,
+        "risk_flags": ["investigation"],
+        "positive_flags": [],
+        "warnings": [],
+    }
+
+    decision = build_trade_decision(candidate, db_path=str(tmp_path / "brain.db"), include_memory_context=False)
+    sizing = decision["position_sizing"]
+
+    assert sizing["risk_multipliers"]["short_interest"] == 0.85
+    assert sizing["risk_multipliers"]["news_sentiment"] == 0.5
+    assert sizing["shares"] < sizing["original_position_sizing"]["shares"]
 
 
 def test_weekly_trade_hunt_returns_structured_decision_object_and_does_not_log_when_disabled(monkeypatch, tmp_path):
@@ -193,6 +352,354 @@ def test_weekly_trade_hunt_returns_structured_decision_object_and_does_not_log_w
     assert recommendation_count == 0
 
 
+def test_weekly_trade_hunt_blocks_candidate_when_data_quality_disallows_final_recommendation(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_data_quality.db")
+    init_trade_tracking_db(db_path)
+    blocked_candidate = _candidate("AAPL")
+    blocked_candidate["data_quality"] = {
+        "quality_label": "poor",
+        "final_recommendation_allowed": False,
+        "warnings": ["IBKR live quote unavailable; using latest historical close."],
+        "errors": ["Latest historical bar is stale."],
+    }
+
+    monkeypatch.setattr(
+        "agent.trading_brain.get_default_universe",
+        lambda universe="large_cap", max_tickers=500: {
+            "ok": True,
+            "tickers": ["AAPL"],
+            "count": 1,
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_multi_strategy_candidates",
+        lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [blocked_candidate], "watchlist_candidates": [], "rejected_candidates": []},
+    )
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(blocked_candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda db_path="strategy_library.db": {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda db_path="strategy_library.db": {"overall": {"total_recommendations": 0}, "by_strategy": [], "by_setup_type": []})
+
+    result = run_weekly_trade_hunt(auto_log=True, include_market_regime=False, include_portfolio_risk=False, db_path=db_path)
+
+    assert result["ok"] is True
+    assert result["summary"]["selected_count"] == 0
+    assert result["summary"]["logged_count"] == 0
+    assert "stale" in result["decision_result"]["not_selected"][0]["reason"].lower()
+
+
+def test_weekly_trade_hunt_includes_async_scan_execution_summary(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_async_summary.db")
+    init_trade_tracking_db(db_path)
+    scan_summary = {
+        "total_tickers": 2,
+        "completed_tickers": 1,
+        "failed_tickers": ["BAD"],
+        "timed_out_tickers": [],
+        "partial_results_used": True,
+        "duration_seconds": 1.25,
+        "warnings": ["Scan completed with partial results due to timeout or provider failures."],
+    }
+
+    monkeypatch.setattr(
+        "agent.trading_brain.get_default_universe",
+        lambda universe="large_cap", max_tickers=500: {"ok": True, "tickers": ["AAPL", "BAD"], "count": 2, "errors": []},
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_multi_strategy_candidates",
+        lambda **kwargs: {
+            "ok": True,
+            "profiles_run": ["momentum_breakout"],
+            "best_candidates": [_candidate("AAPL")],
+            "watchlist_candidates": [],
+            "rejected_candidates": [_candidate("BAD", recommendation_status="rejected", passed=False)],
+            "scan_execution_summary": scan_summary,
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(_candidate("AAPL")))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda db_path="strategy_library.db": {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda db_path="strategy_library.db": {"overall": {"total_recommendations": 0}, "by_strategy": [], "by_setup_type": []})
+
+    result = run_weekly_trade_hunt(auto_log=False, db_path=db_path)
+
+    assert result["scan_execution_summary"] == scan_summary
+    assert result["summary"]["scan_execution_summary"]["partial_results_used"] is True
+    assert "partial results" in " ".join(result["errors"]).lower()
+
+
+def test_blocked_circuit_breaker_prevents_paper_logging(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_circuit_blocked.db")
+    init_trade_tracking_db(db_path)
+
+    monkeypatch.setattr("agent.trading_brain._load_paper_trade_history", lambda db_path: [{"outcome": "loss"}] * 7)
+    monkeypatch.setattr(
+        "agent.trading_brain.get_default_universe",
+        lambda universe="large_cap", max_tickers=500: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []},
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_multi_strategy_candidates",
+        lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [_candidate("AAPL")], "watchlist_candidates": [], "rejected_candidates": []},
+    )
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda db_path="strategy_library.db": {"wins": 0, "losses": 7, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda db_path="strategy_library.db": {"overall": {"total_recommendations": 7}, "by_strategy": [], "by_setup_type": []})
+
+    result = run_weekly_trade_hunt(
+        auto_log=True,
+        db_path=db_path,
+        logging_metadata={"paper_trading": True, "execution_mode": "paper_trading"},
+    )
+
+    assert result["ok"] is True
+    assert result["summary"]["selected_count"] == 0
+    assert result["summary"]["logged_count"] == 0
+    assert result["summary"]["circuit_breaker"]["circuit_status"] == "blocked"
+
+
+def test_reduced_risk_circuit_multiplier_adjusts_position_sizing(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_circuit_reduced.db")
+    init_trade_tracking_db(db_path)
+    candidate = _candidate("AAPL")
+
+    monkeypatch.setattr("agent.trading_brain._load_paper_trade_history", lambda db_path: [{"outcome": "win"}, *[{"outcome": "loss"} for _ in range(5)]])
+    monkeypatch.setattr(
+        "agent.trading_brain.get_default_universe",
+        lambda universe="large_cap", max_tickers=500: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []},
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_multi_strategy_candidates",
+        lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [candidate], "watchlist_candidates": [], "rejected_candidates": []},
+    )
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda db_path="strategy_library.db": {"wins": 1, "losses": 5, "win_rate": 16.67})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda db_path="strategy_library.db": {"overall": {"total_recommendations": 6}, "by_strategy": [], "by_setup_type": []})
+    monkeypatch.setattr("agent.trading_brain.evaluate_macro_risk", lambda: {"ok": True, "macro_risk_level": "low", "risk_multiplier": 1.0, "new_trades_allowed": True, "warnings": [], "reasons": []})
+
+    result = run_weekly_trade_hunt(
+        auto_log=False,
+        include_market_regime=False,
+        include_relative_strength=False,
+        include_portfolio_risk=False,
+        db_path=db_path,
+        logging_metadata={"paper_trading": True, "execution_mode": "paper_trading"},
+    )
+
+    sizing = result["decision_result"]["final_recommendations"][0]["position_sizing"]
+    assert result["summary"]["circuit_breaker"]["circuit_status"] == "reduced_risk"
+    assert sizing["original_position_sizing"]["shares"] == 20
+    assert sizing["shares"] == 10
+
+
+def test_critical_macro_risk_blocks_final_recommendations(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_macro_block.db")
+    init_trade_tracking_db(db_path)
+    candidate = _candidate("AAPL")
+
+    monkeypatch.setattr("agent.trading_brain.get_default_universe", lambda **kwargs: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []})
+    monkeypatch.setattr("agent.trading_brain.scan_multi_strategy_candidates", lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [candidate], "watchlist_candidates": [], "rejected_candidates": []})
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda **kwargs: [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda **kwargs: {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda **kwargs: {"overall": {}})
+    monkeypatch.setattr(
+        "agent.trading_brain.evaluate_macro_risk",
+        lambda: {
+            "ok": True,
+            "macro_risk_level": "critical",
+            "risk_multiplier": 0.25,
+            "new_trades_allowed": False,
+            "event_window_active": True,
+            "active_events": [{"event_type": "FOMC"}],
+            "upcoming_events": [],
+            "warnings": ["Critical macro event window blocks new trades."],
+            "reasons": ["1 macro risk window(s) active."],
+        },
+    )
+
+    result = run_weekly_trade_hunt(auto_log=True, include_market_regime=False, include_portfolio_risk=False, db_path=db_path)
+
+    assert result["ok"] is True
+    assert result["macro_risk"]["macro_risk_level"] == "critical"
+    assert result["summary"]["selected_count"] == 0
+    assert result["summary"]["logged_count"] == 0
+    assert result["decision_result"]["final_recommendations"] == []
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM trade_recommendations").fetchone()[0]
+    assert count == 0
+
+
+def test_build_trade_decision_combines_circuit_macro_and_regime_multipliers(tmp_path):
+    candidate = _candidate("AAPL")
+    candidate["circuit_breaker_context"] = {"circuit_status": "reduced_risk", "max_allowed_risk_multiplier": 0.5}
+    candidate["macro_risk_context"] = {"macro_risk_level": "high", "risk_multiplier": 0.5, "new_trades_allowed": True}
+    candidate["market_regime_context"] = {"regime": "weak_bull_chop", "stock_risk_multiplier": 0.75, "option_risk_multiplier": 0.5}
+    candidate["concentration_risk_context"] = {"risk_level": "high", "risk_multiplier": 0.5, "reasons": ["High correlation."]}
+
+    decision = build_trade_decision(candidate, db_path=str(tmp_path / "brain_multiplier.db"), include_memory_context=False)
+    sizing = decision["position_sizing"]
+
+    assert sizing["original_position_sizing"]["shares"] == 20
+    assert sizing["shares"] == 1
+    assert sizing["combined_risk_multiplier"] == 0.09375
+    assert sizing["risk_multipliers"]["circuit_breaker"] == 0.5
+    assert sizing["risk_multipliers"]["macro_risk"] == 0.5
+    assert sizing["risk_multipliers"]["market_regime"] == 0.75
+    assert sizing["risk_multipliers"]["concentration"] == 0.5
+
+
+def test_concentration_controls_block_candidate_before_logging(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_concentration_block.db")
+    init_trade_tracking_db(db_path)
+    candidate = _candidate("AAPL")
+
+    monkeypatch.setattr("agent.trading_brain.get_default_universe", lambda **kwargs: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []})
+    monkeypatch.setattr("agent.trading_brain.scan_multi_strategy_candidates", lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [candidate], "watchlist_candidates": [], "rejected_candidates": []})
+    monkeypatch.setattr(
+        "agent.trading_brain.get_open_recommendations",
+        lambda **kwargs: [
+            {
+                "ticker": "AAPL",
+                "asset_type": "stock",
+                "direction": "long",
+                "sector": "tech",
+                "entry_price": 100.0,
+                "stop_loss": 90.0,
+                "target_price": 120.0,
+                "quantity": 150,
+                "status": "open",
+            }
+        ],
+    )
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda **kwargs: {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda **kwargs: {"overall": {}})
+    monkeypatch.setattr("agent.trading_brain.evaluate_macro_risk", lambda: {"ok": True, "macro_risk_level": "low", "risk_multiplier": 1.0, "new_trades_allowed": True, "warnings": [], "reasons": []})
+    monkeypatch.setattr(
+        "agent.trading_brain._load_or_refresh_correlation_context",
+        lambda **kwargs: (
+            {"correlations": {"AAPL": {"AAPL": 1.0}}, "tickers": ["AAPL"]},
+            {"ok": True, "source": "latest_snapshot", "warnings": [], "errors": []},
+        ),
+    )
+
+    result = run_weekly_trade_hunt(auto_log=True, include_portfolio_risk=False, db_path=db_path)
+
+    assert result["ok"] is True
+    assert result["summary"]["selected_count"] == 0
+    assert result["summary"]["logged_count"] == 0
+    assert result["selection_result"]["rejected_candidates"][0]["failed_constraints"][-1] == "concentration_risk_blocked"
+    assert result["concentration_summary"]["blocked_count"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM trade_recommendations").fetchone()[0]
+    assert count == 0
+
+
+def test_build_trade_decision_applies_technical_confirmation_multiplier(tmp_path):
+    candidate = _candidate("AAPL")
+    candidate["technical_confirmation_summary"] = {
+        "status": "warning",
+        "score_adjustment": -5.0,
+        "risk_multiplier": 0.5,
+        "reasons": ["Weekly trend is neutral."],
+        "warnings": [],
+    }
+
+    decision = build_trade_decision(candidate, db_path=str(tmp_path / "technical_multiplier.db"), include_memory_context=False)
+    sizing = decision["position_sizing"]
+
+    assert sizing["original_position_sizing"]["shares"] == 20
+    assert sizing["shares"] == 10
+    assert sizing["risk_multipliers"]["technical_confirmation"] == 0.5
+
+
+def test_technical_rejected_candidate_is_not_logged(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_technical_rejected.db")
+    init_trade_tracking_db(db_path)
+    candidate = _candidate("AAPL")
+    candidate["technical_confirmation_summary"] = {
+        "status": "rejected",
+        "score_adjustment": -25.0,
+        "risk_multiplier": 0.0,
+        "reasons": ["Daily and weekly trends conflict."],
+        "warnings": [],
+    }
+
+    monkeypatch.setattr("agent.trading_brain.get_default_universe", lambda **kwargs: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []})
+    monkeypatch.setattr("agent.trading_brain.scan_multi_strategy_candidates", lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [candidate], "watchlist_candidates": [], "rejected_candidates": []})
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda **kwargs: [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda **kwargs: {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda **kwargs: {"overall": {}})
+    monkeypatch.setattr("agent.trading_brain.evaluate_macro_risk", lambda: {"ok": True, "macro_risk_level": "low", "risk_multiplier": 1.0, "new_trades_allowed": True, "warnings": [], "reasons": []})
+    monkeypatch.setattr("agent.trading_brain._load_or_refresh_correlation_context", lambda **kwargs: (None, {"ok": False, "source": "unavailable", "warnings": [], "errors": []}))
+
+    result = run_weekly_trade_hunt(auto_log=True, include_market_regime=False, include_portfolio_risk=False, db_path=db_path)
+
+    assert result["summary"]["logged_count"] == 0
+    assert result["decision_result"]["not_selected"][0]["reason"] == "Technical confirmation rejected candidate."
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trade_recommendations").fetchone()[0] == 0
+
+
+def test_disabled_setup_decay_rejects_candidate(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_setup_disabled.db")
+    init_trade_tracking_db(db_path)
+    candidate = _candidate("AAPL")
+    disabled_decay = {
+        "ok": True,
+        "setups": {
+            "momentum_breakout": {
+                "ok": True,
+                "setup_name": "momentum_breakout",
+                "status": "disabled",
+                "sample_size": 15,
+                "recent_win_rate": 0.0,
+                "recent_expectancy_r": -1.0,
+                "avg_hold_days": 7,
+                "reasons": ["Setup disabled by test."],
+                "warnings": [],
+            }
+        },
+        "counts": {"disabled": 1},
+        "warnings": [],
+    }
+
+    monkeypatch.setattr("agent.trading_brain._load_paper_trade_history", lambda db_path: [])
+    monkeypatch.setattr("agent.trading_brain.evaluate_drawdown_circuit_breaker", lambda *args, **kwargs: {"ok": True, "circuit_status": "normal", "new_trades_allowed": True, "max_allowed_risk_multiplier": 1.0, "warnings": [], "reasons": [], "rolling_loss_streak": 0, "recent_win_rate": None, "recent_expectancy_r": None, "realized_drawdown_percent": 0})
+    monkeypatch.setattr("agent.trading_brain.evaluate_all_setup_decay", lambda *args, **kwargs: disabled_decay)
+    monkeypatch.setattr(
+        "agent.trading_brain.get_default_universe",
+        lambda universe="large_cap", max_tickers=500: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []},
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_multi_strategy_candidates",
+        lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [candidate], "watchlist_candidates": [], "rejected_candidates": []},
+    )
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda db_path="strategy_library.db": {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda db_path="strategy_library.db": {"overall": {"total_recommendations": 0}, "by_strategy": [], "by_setup_type": []})
+
+    result = run_weekly_trade_hunt(
+        auto_log=True,
+        include_market_regime=False,
+        include_relative_strength=False,
+        include_portfolio_risk=False,
+        db_path=db_path,
+        logging_metadata={"paper_trading": True, "execution_mode": "paper_trading"},
+    )
+
+    assert result["summary"]["selected_count"] == 0
+    assert result["summary"]["logged_count"] == 0
+    assert result["selection_result"]["rejected_candidates"][0]["failed_constraints"][-1] == "setup_decay_disabled"
+
+
 def test_weekly_trade_hunt_auto_log_logs_only_valid_final_recommendations(monkeypatch, tmp_path):
     db_path = str(tmp_path / "brain_auto_log.db")
     init_trade_tracking_db(db_path)
@@ -236,6 +743,80 @@ def test_weekly_trade_hunt_auto_log_logs_only_valid_final_recommendations(monkey
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT ticker FROM trade_recommendations ORDER BY id ASC").fetchall()
     assert [row[0] for row in rows] == ["AAPL"]
+
+
+def test_paper_auto_log_stores_fill_context(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_paper_fill.db")
+    init_trade_tracking_db(db_path)
+    candidate = _candidate("AAPL", target_price=125.0, risk_reward=5.0)
+    candidate["average_volume_20"] = 50_000_000
+
+    monkeypatch.setattr(
+        "agent.trading_brain.get_default_universe",
+        lambda universe="large_cap", max_tickers=500: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []},
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_multi_strategy_candidates",
+        lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [candidate], "watchlist_candidates": [], "rejected_candidates": []},
+    )
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda db_path="strategy_library.db": {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda db_path="strategy_library.db": {"overall": {"total_recommendations": 0}, "by_strategy": [], "by_setup_type": []})
+
+    result = run_weekly_trade_hunt(
+        auto_log=True,
+        include_portfolio_risk=False,
+        db_path=db_path,
+        logging_metadata={"paper_trading": True, "execution_mode": "paper_trading"},
+    )
+
+    assert result["summary"]["logged_count"] == 1
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT entry_price, data_snapshot_json FROM trade_recommendations").fetchone()
+    payload = json.loads(row[1])
+    assert payload["intended_entry_price"] == 100.0
+    assert payload["paper_fill"]["ok"] is True
+    assert row[0] == payload["paper_fill"]["estimated_fill_price"]
+
+
+def test_paper_option_without_fill_is_not_logged(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_option_fill_block.db")
+    init_trade_tracking_db(db_path)
+    candidate = _candidate("AAPL", target_price=125.0, risk_reward=5.0)
+    candidate["option_alternatives"] = [
+        _option_candidate(bid=None, ask=None, spread_percent=0.05, mid=3.9)
+    ]
+
+    monkeypatch.setattr(
+        "agent.trading_brain.get_default_universe",
+        lambda universe="large_cap", max_tickers=500: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []},
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_multi_strategy_candidates",
+        lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"], "best_candidates": [candidate], "watchlist_candidates": [], "rejected_candidates": []},
+    )
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(candidate))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda db_path="strategy_library.db": {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda db_path="strategy_library.db": {"overall": {"total_recommendations": 0}, "by_strategy": [], "by_setup_type": []})
+
+    result = run_weekly_trade_hunt(
+        auto_log=True,
+        prefer_options=True,
+        include_market_regime=False,
+        include_relative_strength=False,
+        include_portfolio_risk=False,
+        include_position_sizing=False,
+        db_path=db_path,
+        logging_metadata={"paper_trading": True, "execution_mode": "paper_trading"},
+    )
+
+    assert result["summary"]["logged_count"] == 0
+    assert result["errors"]
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM trade_recommendations").fetchone()[0]
+    assert count == 0
 
 
 def test_weekly_trade_hunt_applies_portfolio_risk_before_final_recommendations(monkeypatch, tmp_path):
@@ -630,6 +1211,52 @@ def test_failed_option_candidates_do_not_replace_stock_trade(monkeypatch, tmp_pa
     assert result["ok"] is True
     assert decision["preferred_instrument"] == "stock"
     assert decision["preferred_option_contract"] is None
+
+
+def test_option_without_approved_risk_is_not_preferred(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_option_risk_block.db")
+    init_trade_tracking_db(db_path)
+
+    monkeypatch.setattr("agent.trading_brain.get_default_universe", lambda **kwargs: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []})
+    monkeypatch.setattr("agent.trading_brain.scan_multi_strategy_candidates", lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"]})
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda db_path="strategy_library.db": [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(_candidate("AAPL")))
+    monkeypatch.setattr("agent.trading_brain.get_market_regime_snapshot", lambda **kwargs: {"ok": True, "regime": "risk_on_uptrend", "summary": "Risk on.", "options_aggressiveness": "normal", "max_trades_adjustment": 1, "trade_aggressiveness": "normal", "risk_flags": []})
+    monkeypatch.setattr("agent.trading_brain.apply_regime_to_trade_selection", lambda selection_result, regime_result: selection_result)
+    blocked_option = _option_candidate(
+        option_trade_risk={
+            "ok": False,
+            "approved": False,
+            "status": "blocked",
+            "errors": ["Usable Greeks are unavailable."],
+            "warnings": [],
+        },
+        options_research_status="blocked",
+    )
+    monkeypatch.setattr(
+        "agent.trading_brain.scan_options_for_weekly_selection",
+        lambda selected_stock_candidates, max_contracts_per_ticker=3: {
+            "ok": True,
+            "results": [{"ticker": "AAPL", "best_option_candidates": [blocked_option], "summary": {}, "errors": []}],
+            "best_option_candidates": [blocked_option],
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda **kwargs: {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda **kwargs: {"overall": {}})
+
+    result = run_weekly_trade_hunt(
+        include_options=True,
+        prefer_options=True,
+        include_portfolio_risk=False,
+        include_position_sizing=False,
+        db_path=db_path,
+    )
+    decision = result["decision_result"]["final_recommendations"][0]
+
+    assert decision["preferred_instrument"] == "stock"
+    assert decision["preferred_option_contract"] is None
+    assert "greeks" in (decision["option_selection_reason"] or "").lower()
 
 
 def test_cheap_but_low_probability_option_is_not_preferred(monkeypatch, tmp_path):

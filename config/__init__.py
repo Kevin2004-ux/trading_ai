@@ -21,6 +21,11 @@ IBKR_PORT = os.getenv("IBKR_PORT", "7496")
 IBKR_CLIENT_ID = os.getenv("IBKR_CLIENT_ID", "123")
 IBKR_READ_ONLY = os.getenv("IBKR_READ_ONLY", "true")
 IBKR_USE_DELAYED_DATA = os.getenv("IBKR_USE_DELAYED_DATA", "true")
+IBKR_TIMEOUT_SECONDS = os.getenv("IBKR_TIMEOUT_SECONDS", "10")
+MARKET_DATA_MODE = os.getenv("MARKET_DATA_MODE", "auto")
+ALLOW_HISTORICAL_BAR_FALLBACK = os.getenv("ALLOW_HISTORICAL_BAR_FALLBACK", "true")
+ALLOW_LIVE_QUOTE_REQUIRED = os.getenv("ALLOW_LIVE_QUOTE_REQUIRED", "false")
+ALLOW_OPTIONS_WITHOUT_QUOTES = os.getenv("ALLOW_OPTIONS_WITHOUT_QUOTES", "false")
 
 # ==============================================================================
 # -- TRADING & DATA PARAMETERS --
@@ -36,6 +41,7 @@ STOCKS_TO_MONITOR = ['AAPL', 'TSLA', 'NVDA']
 # Example: Train on 3 years, validate on the next 1 year, then test on the following 1 year.
 TRAIN_YEARS = 1
 VALIDATION_YEARS = 1
+VALIDATION_MONTHS = int(os.getenv("VALIDATION_MONTHS", "12"))
 TEST_YEARS = 0
 # This controls how often the entire model suite is retrained.
 ROLLING_WINDOW_STEP_MONTHS = 6

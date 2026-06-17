@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import contextmanager
 
 from providers import ibkr_provider
 
@@ -16,10 +17,22 @@ class FakeStock:
         self.conId = 12345
 
 
+class FakeOption:
+    def __init__(self, symbol, lastTradeDateOrContractMonth, strike, right, exchange, currency="USD"):
+        self.symbol = symbol
+        self.lastTradeDateOrContractMonth = lastTradeDateOrContractMonth
+        self.strike = strike
+        self.right = right
+        self.exchange = exchange
+        self.currency = currency
+        self.secType = "OPT"
+        self.conId = 54321
+
+
 class FakeIB:
     instances = []
 
-    def __init__(self, *, fail_connect=False, bars=None, quote=None, option_params=None):
+    def __init__(self, *, fail_connect=False, bars=None, quote=None, option_params=None, option_quote=None):
         self.fail_connect = fail_connect
         self.connected = False
         self.bars = bars or []
@@ -33,8 +46,22 @@ class FakeIB:
             marketPrice=lambda: 101.5,
         )
         self.option_params = option_params or []
+        self.option_quote = option_quote or SimpleNamespace(
+            bid=4.8,
+            ask=5.0,
+            last=4.9,
+            close=4.85,
+            volume=250,
+            callOpenInterest=1400,
+            putOpenInterest=1300,
+            modelGreeks=SimpleNamespace(impliedVol=0.28, delta=0.52, gamma=0.05, theta=-0.04, vega=0.11),
+            bidGreeks=None,
+            askGreeks=None,
+            marketDataType=3,
+        )
         self.delayed_mode = None
         self.market_data_types_requested = []
+        self.requested_contracts = []
         FakeIB.instances.append(self)
 
     def connect(self, host, port, clientId, readonly=True, timeout=8):
@@ -53,12 +80,16 @@ class FakeIB:
         self.market_data_types_requested.append(market_data_type)
 
     def qualifyContracts(self, contract):
+        self.requested_contracts.append(contract)
         return [contract]
 
     def reqHistoricalData(self, *args, **kwargs):
         return self.bars
 
     def reqMktData(self, *args, **kwargs):
+        contract = args[0] if args else None
+        if getattr(contract, "secType", None) == "OPT":
+            return self.option_quote
         return self.quote
 
     def sleep(self, seconds):
@@ -72,7 +103,7 @@ class FakeIB:
 
 
 def _fake_module(fake_ib_cls):
-    return SimpleNamespace(IB=fake_ib_cls, Stock=FakeStock)
+    return SimpleNamespace(IB=fake_ib_cls, Stock=FakeStock, Option=FakeOption)
 
 
 def test_missing_ib_insync_returns_clean_unavailable(monkeypatch):
@@ -152,7 +183,7 @@ def test_mocked_ibkr_quote_normalizes_to_existing_schema(monkeypatch):
     assert result["data"]["previous_close"] == 100.0
 
 
-def test_ibkr_options_returns_metadata_or_clean_unavailable(monkeypatch):
+def test_ibkr_options_returns_small_quoted_chain_when_snapshots_work(monkeypatch):
     class OptionsIB(FakeIB):
         def __init__(self):
             super().__init__(
@@ -169,11 +200,12 @@ def test_ibkr_options_returns_metadata_or_clean_unavailable(monkeypatch):
 
     result = ibkr_provider.get_ibkr_options_chain("AAPL", min_days_to_expiration=1, max_days_to_expiration=120)
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["source"] == "ibkr"
-    assert result["data"]["row_count"] == 0
+    assert result["data"]["row_count"] > 0
+    assert result["data"]["contracts"][0]["mid"] == 4.9
     assert "metadata" in result["data"]
-    assert "not enabled yet" in result["error"]
+    assert result["error"] is None
 
 
 def test_ibkr_provider_does_not_expose_execution_calls():
@@ -218,7 +250,7 @@ def test_market_snapshot_uses_historical_bar_fallback_when_quote_unavailable(mon
     assert result["data"]["quote_fallback_used"] is True
     assert result["data"]["quote"]["quote_source"] == "historical_bar_fallback"
     assert result["data"]["quote"]["last_price"] == 103.0
-    assert "IBKR quote unavailable" in result["data"]["data_quality_warnings"][0]
+    assert "IBKR live quote unavailable" in result["data"]["data_quality_warnings"][0]
 
 
 def test_ibkr_diagnostic_schema_and_subscription_warning(monkeypatch):
@@ -259,3 +291,117 @@ def test_ibkr_diagnostic_schema_and_subscription_warning(monkeypatch):
     assert result["permissions_summary"]["options_quotes_available"] is False
     assert any("market data" in warning.lower() for warning in result["warnings"])
     assert FakeIB.instances[-1].market_data_types_requested
+
+
+def test_ibkr_normalizes_class_share_symbol_before_contract_lookup(monkeypatch):
+    class NormalizingIB(FakeIB):
+        def __init__(self):
+            super().__init__(
+                bars=[
+                    SimpleNamespace(date="2026-06-05", open=100, high=103, low=99, close=102, volume=1000),
+                ]
+            )
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(NormalizingIB))
+
+    result = ibkr_provider.get_ibkr_historical_bars("BRK.B", lookback_days=1)
+
+    assert result["ok"] is True
+    assert result["ticker"] == "BRK.B"
+    assert result["data"]["provider_ticker"] == "BRK B"
+    assert FakeIB.instances[-1].requested_contracts[0].symbol == "BRK B"
+
+
+def test_ibkr_timeout_returns_clean_error(monkeypatch):
+    @contextmanager
+    def timeout_connection():
+        raise ibkr_provider._IbkrTimeoutError("IBKR historical bars timed out for WMT after 10 seconds.")
+        yield
+
+    monkeypatch.setattr(ibkr_provider, "_ibkr_connection", timeout_connection)
+
+    result = ibkr_provider.get_ibkr_historical_bars("WMT", lookback_days=1)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+    assert result["provider"] == "ibkr"
+    assert result["ticker"] == "WMT"
+
+
+def test_near_money_option_contract_selection_prefers_closest_strikes():
+    specs = ibkr_provider._select_near_money_option_specs(
+        "AAPL",
+        {
+            "matching_expirations": ["2026-07-17"],
+            "strikes": [90.0, 100.0, 105.0, 110.0],
+        },
+        underlying_price=103.0,
+        max_contracts=4,
+    )
+
+    assert [spec["strike"] for spec in specs] == [105.0, 105.0, 100.0, 100.0]
+    assert {spec["option_type"] for spec in specs} == {"call", "put"}
+
+
+def test_option_quote_diagnostic_normalizes_successful_quotes(monkeypatch):
+    class OptionQuoteIB(FakeIB):
+        def __init__(self):
+            super().__init__(
+                option_params=[
+                    SimpleNamespace(
+                        expirations={"20260717"},
+                        strikes={95.0, 100.0, 105.0},
+                        exchange="SMART",
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(OptionQuoteIB))
+
+    result = ibkr_provider.diagnose_ibkr_option_quotes("AAPL", max_contracts=2)
+
+    assert result["ok"] is True
+    assert result["metadata"]["ok"] is True
+    assert len(result["contracts_tested"]) == 2
+    assert result["permissions_summary"]["option_quotes_available"] is True
+    first_quote = result["quotes"][0]
+    assert first_quote["ok"] is True
+    assert first_quote["bid"] == 4.8
+    assert first_quote["ask"] == 5.0
+    assert first_quote["mid"] == 4.9
+    assert first_quote["model_greeks"]["delta"] == 0.52
+
+
+def test_option_quote_diagnostic_reports_opra_permission_gap(monkeypatch):
+    class MissingOpraIB(FakeIB):
+        def __init__(self):
+            super().__init__(
+                option_params=[
+                    SimpleNamespace(
+                        expirations={"20260717"},
+                        strikes={100.0, 105.0},
+                        exchange="SMART",
+                    )
+                ],
+                option_quote=SimpleNamespace(
+                    bid=float("nan"),
+                    ask=float("nan"),
+                    last=float("nan"),
+                    close=float("nan"),
+                    volume=None,
+                    callOpenInterest=None,
+                    putOpenInterest=None,
+                    modelGreeks=None,
+                    marketDataType=3,
+                ),
+            )
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(MissingOpraIB))
+
+    result = ibkr_provider.diagnose_ibkr_option_quotes("AAPL", max_contracts=2)
+
+    assert result["ok"] is True
+    assert result["permissions_summary"]["option_metadata_available"] is True
+    assert result["permissions_summary"]["option_quotes_available"] is False
+    assert result["permissions_summary"]["likely_missing_opra"] is True
+    assert any("blocked" in warning.lower() for warning in result["warnings"])

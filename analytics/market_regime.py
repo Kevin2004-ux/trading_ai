@@ -275,8 +275,14 @@ def determine_market_regime(
             "ok": True,
             "timestamp": timestamp,
             "regime": "unknown",
+            "risk_level": "medium",
+            "confidence": 0.0,
             "confidence_label": "low",
-            "trade_aggressiveness": "normal",
+            "trade_aggressiveness": "defensive",
+            "stock_risk_multiplier": 0.5,
+            "option_risk_multiplier": 0.0,
+            "allowed_setups": ["watchlist_only"],
+            "blocked_setups": ["all_final_recommendations"],
             "max_trades_adjustment": 0,
             "long_bias": False,
             "short_bias": False,
@@ -284,6 +290,9 @@ def determine_market_regime(
             "index_context": index_context,
             "breadth_context": breadth_context,
             "risk_flags": ["Insufficient market data for regime analysis."],
+            "warnings": ["Insufficient market data for regime analysis."],
+            "reasons": ["Index and volatility context are unavailable."],
+            "data_quality": {"quality_label": "poor"},
             "summary": "Market regime is unknown because index and volatility context are unavailable.",
         }
 
@@ -295,19 +304,21 @@ def determine_market_regime(
     volatility_label = vix_context.get("volatility_label", "unknown")
     breadth_label = breadth_context.get("breadth_label", "unknown")
 
-    regime = "mixed"
+    regime = "neutral_range"
     if volatility_label == "high":
-        regime = "high_volatility"
+        regime = "high_volatility_risk_off"
+    elif bearish_count >= 2 and volatility_label in {"elevated", "high"}:
+        regime = "liquidity_stress"
     elif bearish_count >= 2:
-        regime = "risk_off_downtrend"
-    elif bullish_count >= 2 and extended_count >= 2:
-        regime = "risk_on_extended"
-    elif bullish_count >= 2 and bearish_count == 0:
-        regime = "risk_on_uptrend"
-    elif mixed_count >= 1 and bullish_count <= 1 and bearish_count <= 1:
-        regime = "neutral_chop"
+        regime = "bear_trend"
+    elif bullish_count >= 2 and breadth_label in {"strong", "healthy"} and volatility_label in {"low", "normal"} and extended_count == 0:
+        regime = "strong_bull_trend"
+    elif bullish_count >= 2 and (extended_count >= 1 or breadth_label in {"mixed", "unknown"}):
+        regime = "weak_bull_chop"
+    elif mixed_count >= 1 and breadth_label == "weak":
+        regime = "distribution_warning"
     elif bullish_count == 0 and bearish_count == 0 and constructive_count >= 2:
-        regime = "neutral_chop"
+        regime = "neutral_range"
 
     risk_flags: list[str] = []
     if volatility_label == "elevated":
@@ -323,55 +334,123 @@ def determine_market_regime(
     if bearish_count >= 2:
         risk_flags.append("Multiple major indexes are below key moving averages.")
 
-    if regime == "risk_on_uptrend":
+    if regime == "strong_bull_trend":
         confidence_label = "high" if breadth_label in {"healthy", "strong"} else "medium"
-        trade_aggressiveness = "high" if volatility_label == "low" and breadth_label == "strong" else "normal"
+        confidence = 0.9 if confidence_label == "high" else 0.75
+        risk_level = "low"
+        trade_aggressiveness = "aggressive" if volatility_label == "low" and breadth_label == "strong" else "normal"
+        stock_risk_multiplier = 1.0
+        option_risk_multiplier = 1.0
         max_trades_adjustment = 1
         long_bias = True
         short_bias = False
         options_aggressiveness = "aggressive" if volatility_label == "low" else "normal"
-    elif regime == "risk_on_extended":
+        allowed_setups = ["momentum_breakout", "trend_pullback", "relative_strength"]
+        blocked_setups = []
+    elif regime == "weak_bull_chop":
         confidence_label = "medium"
-        trade_aggressiveness = "low"
+        confidence = 0.65
+        risk_level = "medium"
+        trade_aggressiveness = "conservative"
+        stock_risk_multiplier = 0.75
+        option_risk_multiplier = 0.5
         max_trades_adjustment = -1
         long_bias = True
         short_bias = False
         options_aggressiveness = "conservative"
-    elif regime == "neutral_chop":
+        allowed_setups = ["trend_pullback", "relative_strength"]
+        blocked_setups = ["low_quality_breakout"]
+    elif regime == "neutral_range":
         confidence_label = "medium" if valid_indexes else "low"
-        trade_aggressiveness = "low"
+        confidence = 0.55 if valid_indexes else 0.35
+        risk_level = "medium"
+        trade_aggressiveness = "conservative"
+        stock_risk_multiplier = 0.65
+        option_risk_multiplier = 0.25
         max_trades_adjustment = -2
         long_bias = False
         short_bias = False
         options_aggressiveness = "conservative"
-    elif regime == "risk_off_downtrend":
+        allowed_setups = ["oversold_reversal", "catalyst_watch"]
+        blocked_setups = ["momentum_breakout"]
+    elif regime == "distribution_warning":
+        confidence_label = "medium"
+        confidence = 0.65
+        risk_level = "high"
+        trade_aggressiveness = "defensive"
+        stock_risk_multiplier = 0.5
+        option_risk_multiplier = 0.0
+        max_trades_adjustment = -3
+        long_bias = False
+        short_bias = False
+        options_aggressiveness = "avoid"
+        allowed_setups = ["watchlist_only"]
+        blocked_setups = ["momentum_breakout", "relative_strength"]
+    elif regime == "bear_trend":
         confidence_label = "high" if bearish_count >= 3 else "medium"
-        trade_aggressiveness = "none"
+        confidence = 0.85 if bearish_count >= 3 else 0.7
+        risk_level = "high"
+        trade_aggressiveness = "defensive"
+        stock_risk_multiplier = 0.35
+        option_risk_multiplier = 0.0
         max_trades_adjustment = -5
         long_bias = False
         short_bias = True
         options_aggressiveness = "avoid"
-    elif regime == "high_volatility":
+        allowed_setups = ["watchlist_only"]
+        blocked_setups = ["momentum_breakout", "trend_pullback", "relative_strength"]
+    elif regime == "high_volatility_risk_off":
         confidence_label = "high"
-        trade_aggressiveness = "none"
+        confidence = 0.9
+        risk_level = "critical"
+        trade_aggressiveness = "blocked"
+        stock_risk_multiplier = 0.0
+        option_risk_multiplier = 0.0
         max_trades_adjustment = -5
         long_bias = False
         short_bias = False
         options_aggressiveness = "avoid"
+        allowed_setups = []
+        blocked_setups = ["all_final_recommendations"]
+    elif regime == "liquidity_stress":
+        confidence_label = "high"
+        confidence = 0.9
+        risk_level = "critical"
+        trade_aggressiveness = "blocked"
+        stock_risk_multiplier = 0.0
+        option_risk_multiplier = 0.0
+        max_trades_adjustment = -5
+        long_bias = False
+        short_bias = False
+        options_aggressiveness = "avoid"
+        allowed_setups = []
+        blocked_setups = ["all_final_recommendations"]
     elif regime == "mixed":
         confidence_label = "low" if breadth_label == "unknown" else "medium"
-        trade_aggressiveness = "low"
+        confidence = 0.45
+        risk_level = "medium"
+        trade_aggressiveness = "conservative"
+        stock_risk_multiplier = 0.65
+        option_risk_multiplier = 0.25
         max_trades_adjustment = -1
         long_bias = False
         short_bias = False
         options_aggressiveness = "conservative"
+        allowed_setups = ["trend_pullback", "catalyst_watch"]
+        blocked_setups = ["low_quality_breakout"]
     else:
         confidence_label = "low"
-        trade_aggressiveness = "normal"
+        confidence = 0.35
+        risk_level = "medium"
+        trade_aggressiveness = "defensive"
+        stock_risk_multiplier = 0.5
+        option_risk_multiplier = 0.0
         max_trades_adjustment = 0
         long_bias = False
         short_bias = False
         options_aggressiveness = "normal"
+        allowed_setups = ["watchlist_only"]
+        blocked_setups = ["unknown_quality_setups"]
 
     summary = (
         f"Market regime is {regime.replace('_', ' ')} with {confidence_label} confidence. "
@@ -382,8 +461,14 @@ def determine_market_regime(
         "ok": True,
         "timestamp": timestamp,
         "regime": regime,
+        "risk_level": risk_level,
+        "confidence": confidence,
         "confidence_label": confidence_label,
         "trade_aggressiveness": trade_aggressiveness,
+        "stock_risk_multiplier": stock_risk_multiplier,
+        "option_risk_multiplier": option_risk_multiplier,
+        "allowed_setups": allowed_setups,
+        "blocked_setups": blocked_setups,
         "max_trades_adjustment": max_trades_adjustment,
         "long_bias": long_bias,
         "short_bias": short_bias,
@@ -391,6 +476,14 @@ def determine_market_regime(
         "index_context": index_context,
         "breadth_context": breadth_context,
         "risk_flags": risk_flags,
+        "warnings": risk_flags,
+        "reasons": [
+            f"bullish_indexes={bullish_count}",
+            f"bearish_indexes={bearish_count}",
+            f"volatility={volatility_label}",
+            f"breadth={breadth_label}",
+        ],
+        "data_quality": {"quality_label": "usable" if valid_indexes else "poor"},
         "summary": summary,
     }
 
@@ -457,13 +550,13 @@ def apply_regime_to_trade_selection(
     original_selected = list(selection_result.get("selected_trades", [])) if isinstance(selection_result, dict) and isinstance(selection_result.get("selected_trades"), list) else []
     original_max = int(selection_summary.get("max_trades", len(selected_trades) or 0) or 0)
     capped_max = max(0, original_max + int(regime_result.get("max_trades_adjustment", 0) or 0))
-    if regime in {"risk_off_downtrend", "high_volatility"}:
+    if regime in {"risk_off_downtrend", "high_volatility", "bear_trend", "high_volatility_risk_off", "liquidity_stress", "distribution_warning"}:
         capped_max = min(capped_max, 1)
-        if trade_aggressiveness == "none":
+        if trade_aggressiveness in {"none", "blocked"}:
             capped_max = 0
-    elif regime == "neutral_chop":
+    elif regime in {"neutral_chop", "neutral_range"}:
         capped_max = min(capped_max, 2) if capped_max > 0 else 0
-    elif regime == "risk_on_extended":
+    elif regime in {"risk_on_extended", "weak_bull_chop"}:
         capped_max = min(capped_max, 3) if capped_max > 0 else 0
 
     trimmed = selected_trades[capped_max:] if capped_max < len(selected_trades) else []

@@ -80,10 +80,12 @@ def test_normalize_options_chain_creates_expected_schema():
         "open_interest",
         "implied_volatility",
         "iv_rank",
+        "iv_percentile",
         "delta",
         "gamma",
         "theta",
         "vega",
+        "rho",
         "spread_percent",
         "breakeven_price",
         "breakeven_move_percent",
@@ -129,6 +131,11 @@ def test_strong_long_call_candidate_passes_and_weak_contract_is_rejected():
     assert "minimum_open_interest" in rejected["O:AAPL260703C00130000"]["failed_constraints"]
     assert "minimum_volume" in rejected["O:AAPL260703C00130000"]["failed_constraints"]
     assert "maximum_iv_rank" in rejected["O:AAPL260703C00130000"]["failed_constraints"]
+    best = result["best_option_candidates"][0]
+    assert best["iv_context"]["iv_context"] == "cheap"
+    assert best["greeks_monitoring"]["greeks_quality"] in {"good", "usable"}
+    assert best["option_trade_risk"]["approved"] is True
+    assert best["options_research_status"] == "paper_eligible"
 
 
 def test_bad_spread_contract_is_rejected():
@@ -139,6 +146,7 @@ def test_bad_spread_contract_is_rejected():
 
     rejected = {candidate["option_contract"]: candidate for candidate in result["rejected_option_candidates"]}
     assert "maximum_bid_ask_spread_percent" in rejected["O:AAPL260703C00125000"]["failed_constraints"]
+    assert "option_trade_risk_approved" in rejected["O:AAPL260703C00125000"]["failed_constraints"]
 
 
 def test_expiration_outside_range_is_rejected():
@@ -190,3 +198,35 @@ def test_ibkr_options_chain_returns_clean_unavailable_when_selected(monkeypatch)
     assert result["ok"] is False
     assert result["source"] == "ibkr"
     assert result["data"]["contracts"] == []
+
+
+def test_ibkr_options_unavailable_keeps_option_recommendations_blocked(monkeypatch):
+    monkeypatch.setenv("OPTIONS_DATA_PROVIDER", "ibkr")
+    monkeypatch.setattr(config, "OPTIONS_DATA_PROVIDER", "ibkr", raising=False)
+    monkeypatch.setattr(
+        "providers.ibkr_provider.get_ibkr_options_chain",
+        lambda ticker, expiration=None, min_days_to_expiration=14, max_days_to_expiration=56: {
+            "ok": False,
+            "ticker": ticker,
+            "source": "ibkr",
+            "data": {
+                "contracts": [],
+                "row_count": 0,
+                "diagnostic": {
+                    "permissions_summary": {
+                        "option_metadata_available": True,
+                        "option_quotes_available": False,
+                        "likely_missing_opra": True,
+                    }
+                },
+            },
+            "error": "IBKR option quote snapshots are unavailable. OPRA/options market data permissions may be missing.",
+        },
+    )
+
+    result = get_options_chain("AAPL")
+
+    assert result["ok"] is False
+    assert result["data"]["contracts"] == []
+    assert result["data"]["diagnostic"]["permissions_summary"]["likely_missing_opra"] is True
+    assert "unavailable" in result["error"].lower()

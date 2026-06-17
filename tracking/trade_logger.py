@@ -114,6 +114,17 @@ def _ensure_initialized(db_path: str) -> None:
                 FOREIGN KEY(recommendation_id) REFERENCES trade_recommendations(id)
             );
 
+            CREATE TABLE IF NOT EXISTS correlation_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                lookback_days INTEGER NOT NULL,
+                tickers_json TEXT NOT NULL,
+                matrix_json TEXT NOT NULL,
+                summary_json TEXT,
+                source TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_trade_recommendations_status
             ON trade_recommendations(status);
 
@@ -125,6 +136,9 @@ def _ensure_initialized(db_path: str) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_trade_outcomes_recommendation_id
             ON trade_outcomes(recommendation_id);
+
+            CREATE INDEX IF NOT EXISTS idx_correlation_snapshots_created_at
+            ON correlation_snapshots(created_at);
             """
         )
 
@@ -187,16 +201,25 @@ def _fetch_all(
 def init_trade_tracking_db(db_path: str = DEFAULT_DB_PATH) -> dict:
     try:
         _ensure_initialized(db_path)
+        from db.schema_manager import apply_pending_migrations
+
+        migration_result = apply_pending_migrations(db_path)
 
         return {
-            "ok": True,
+            "ok": bool(migration_result.get("ok", True)),
             "db_path": db_path,
             "tables_created": [
                 "trade_recommendations",
                 "scanner_runs",
                 "candidate_evaluations",
                 "trade_outcomes",
+                "schema_migrations",
+                "audit_events",
+                "pipeline_runs",
+                "pipeline_checkpoints",
+                "correlation_snapshots",
             ],
+            "migration_result": migration_result,
         }
     except sqlite3.Error as exc:
         return {"ok": False, "error": str(exc), "db_path": db_path}
@@ -327,6 +350,76 @@ def get_open_recommendations(db_path: str = DEFAULT_DB_PATH) -> list[dict] | dic
                 """,
                 table_name="trade_recommendations",
             )
+    except sqlite3.Error as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def get_trade_history(db_path: str = DEFAULT_DB_PATH) -> list[dict] | dict:
+    try:
+        _ensure_initialized(db_path)
+        with _connect(db_path) as conn:
+            rows = _fetch_all(
+                conn,
+                """
+                WITH latest_outcomes AS (
+                    SELECT t1.*
+                    FROM trade_outcomes t1
+                    INNER JOIN (
+                        SELECT recommendation_id, MAX(id) AS max_id
+                        FROM trade_outcomes
+                        GROUP BY recommendation_id
+                    ) t2
+                    ON t1.recommendation_id = t2.recommendation_id
+                    AND t1.id = t2.max_id
+                )
+                SELECT
+                    tr.*,
+                    lo.created_at AS latest_outcome_created_at,
+                    lo.outcome AS latest_outcome,
+                    lo.exit_price AS latest_exit_price,
+                    lo.exit_reason AS latest_exit_reason,
+                    lo.realized_return AS latest_realized_return,
+                    lo.max_gain AS latest_max_gain,
+                    lo.max_drawdown AS latest_max_drawdown,
+                    lo.grading_data_json AS latest_grading_data_json
+                FROM trade_recommendations tr
+                LEFT JOIN latest_outcomes lo
+                    ON lo.recommendation_id = tr.id
+                ORDER BY tr.created_at ASC, tr.id ASC
+                """,
+                table_name="trade_recommendations",
+            )
+        for row in rows:
+            if "latest_grading_data_json" in row:
+                row["latest_grading_data_json"] = _deserialize_json(row["latest_grading_data_json"])
+            if row.get("latest_outcome") and not row.get("outcome"):
+                row["outcome"] = row["latest_outcome"]
+            if row.get("latest_exit_price") is not None and row.get("exit_price") is None:
+                row["exit_price"] = row["latest_exit_price"]
+        return rows
+    except sqlite3.Error as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def get_candidate_decision_history(db_path: str = DEFAULT_DB_PATH) -> list[dict] | dict:
+    try:
+        _ensure_initialized(db_path)
+        with _connect(db_path) as conn:
+            rows = _fetch_all(
+                conn,
+                """
+                SELECT ce.*, sr.universe, sr.market_data_freshness, sr.config_json AS scanner_config_json
+                FROM candidate_evaluations ce
+                LEFT JOIN scanner_runs sr
+                    ON sr.id = ce.scanner_run_id
+                ORDER BY ce.created_at ASC, ce.id ASC
+                """,
+                table_name="candidate_evaluations",
+            )
+        for row in rows:
+            if "scanner_config_json" in row:
+                row["scanner_config_json"] = _deserialize_json(row["scanner_config_json"])
+        return rows
     except sqlite3.Error as exc:
         return {"ok": False, "error": str(exc)}
 

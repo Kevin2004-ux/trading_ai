@@ -12,6 +12,7 @@ from analytics.options_mispricing import (
     evaluate_option_mispricing,
 )
 from engine.constraint_engine import evaluate_option_constraints
+from options.options_risk import evaluate_option_trade_risk
 from realtime.options_chain import calculate_option_metrics, normalize_options_chain
 
 def black_scholes_call_price(S, K, T, r, sigma):
@@ -187,6 +188,8 @@ def evaluate_option_chain_for_trade(
     )
 
     for raw_option in normalized_chain:
+        if strategy == "long_call" and str(raw_option.get("option_type", "")).lower() != "call":
+            continue
         option_metrics = calculate_option_metrics(
             raw_option,
             underlying_price=current_price or 0.0,
@@ -242,6 +245,17 @@ def evaluate_option_chain_for_trade(
         option_candidate["mispricing_label"] = mispricing_context.get("mispricing_label")
         option_candidate["mispricing_score"] = mispricing_context.get("mispricing_score")
 
+        option_trade_risk = evaluate_option_trade_risk(
+            option_candidate,
+            historical_iv_values=underlying_candidate.get("historical_iv_values")
+            if isinstance(underlying_candidate.get("historical_iv_values"), list)
+            else None,
+        )
+        option_candidate["iv_context"] = option_trade_risk.get("iv_context")
+        option_candidate["greeks_monitoring"] = option_trade_risk.get("greeks")
+        option_candidate["option_trade_risk"] = option_trade_risk
+        option_candidate["options_research_status"] = option_trade_risk.get("options_research_status", "blocked")
+
         constraint_result = evaluate_option_constraints(
             option_candidate,
             underlying_result=underlying_result,
@@ -252,6 +266,26 @@ def evaluate_option_chain_for_trade(
         option_candidate["constraint_results"] = constraint_result["constraint_results"]
         option_candidate["failed_constraints"] = constraint_result["failed_constraints"]
         option_candidate["rejection_reason"] = constraint_result["rejection_reason"]
+
+        if not option_trade_risk.get("approved"):
+            failed_constraints = list(option_candidate.get("failed_constraints", []))
+            if "option_trade_risk_approved" not in failed_constraints:
+                failed_constraints.append("option_trade_risk_approved")
+            option_candidate["failed_constraints"] = failed_constraints
+            option_candidate["passed"] = False
+            option_candidate["recommendation_status"] = (
+                "watchlist" if option_trade_risk.get("status") == "research_only" and constraint_result["passed"] else "rejected"
+            )
+            option_candidate["rejection_reason"] = "; ".join(
+                option_trade_risk.get("errors")
+                or option_trade_risk.get("warnings")
+                or ["Option IV/Greeks/spread risk approval is required."]
+            )
+            if _safe_float(option_candidate.get("score")) is not None:
+                option_candidate["score"] = round(
+                    max(0.0, (_safe_float(option_candidate.get("score")) or 0.0) * (_safe_float(option_trade_risk.get("risk_multiplier")) or 0.0)),
+                    2,
+                )
         evaluated_candidates.append(option_candidate)
 
     recommendable = _rank_option_candidates(
@@ -265,6 +299,12 @@ def evaluate_option_chain_for_trade(
     )
 
     best_option_candidates = recommendable[:max_contracts]
+    option_risk_summary = {
+        "evaluated_count": len(evaluated_candidates),
+        "approved_count": sum(1 for item in evaluated_candidates if (item.get("option_trade_risk") or {}).get("approved") is True),
+        "research_only_count": sum(1 for item in evaluated_candidates if str((item.get("option_trade_risk") or {}).get("status", "")).lower() == "research_only"),
+        "blocked_count": sum(1 for item in evaluated_candidates if str((item.get("option_trade_risk") or {}).get("status", "")).lower() == "blocked"),
+    }
     summary_message = "Option chain evaluated successfully."
     if not best_option_candidates and watchlist:
         summary_message = "No option contracts passed recommendation thresholds, but watchlist alternatives were found."
@@ -281,7 +321,9 @@ def evaluate_option_chain_for_trade(
         "summary": {
             "contracts_evaluated": len(evaluated_candidates),
             "contracts_passed": len(best_option_candidates),
+            "option_risk_summary": option_risk_summary,
             "message": summary_message,
         },
+        "option_risk_summary": option_risk_summary,
         "errors": [],
     }

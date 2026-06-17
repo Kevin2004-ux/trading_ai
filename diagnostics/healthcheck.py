@@ -8,6 +8,8 @@ import platform
 from datetime import datetime, timezone
 from typing import Any
 
+from config.runtime_readiness import check_runtime_readiness
+from macro.macro_risk import evaluate_macro_risk
 from tracking.trade_logger import init_trade_tracking_db
 
 
@@ -39,6 +41,26 @@ OPTIONAL_ENV_VARS = [
     "FMP_API_KEY",
     "PINECONE_API_KEY",
     "PINECONE_INDEX_NAME",
+    "PINECONE_NAMESPACE",
+    "MEMORY_ENABLED",
+    "MEMORY_REQUIRED",
+    "PINECONE_MEMORY_ENABLED",
+    "LOCAL_MEMORY_FALLBACK",
+    "MEMORY_MIN_SIMILARITY",
+    "MEMORY_EXPLANATION_MIN_SIMILARITY",
+    "MEMORY_MAX_AGE_DAYS",
+    "MEMORY_REQUIRE_VERIFIED_OUTCOMES",
+    "SCHEDULER_ENABLED",
+    "SCHEDULER_TIMEZONE",
+    "SCHEDULER_MARKET_DAYS_ONLY",
+    "DEFAULT_PAPER_SCAN_DAY",
+    "DEFAULT_PAPER_SCAN_TIME",
+    "DEFAULT_HEALTHCHECK_TIME",
+    "ALERTS_ENABLED",
+    "ALERT_CHANNELS",
+    "ALERT_WEBHOOK_URL",
+    "ALERT_EMAIL_ENABLED",
+    "ALERT_MIN_SEVERITY",
     "MARKET_DATA_PROVIDER",
     "OPTIONS_DATA_PROVIDER",
     "IBKR_HOST",
@@ -46,6 +68,11 @@ OPTIONAL_ENV_VARS = [
     "IBKR_CLIENT_ID",
     "IBKR_READ_ONLY",
     "IBKR_USE_DELAYED_DATA",
+    "NEWS_RESEARCH_ENABLED",
+    "NEWS_RESEARCH_REQUIRED",
+    "SHORT_INTEREST_ENABLED",
+    "SHORT_INTEREST_REQUIRED",
+    "IBKR_NEWS_DIAGNOSTIC_ENABLED",
 ]
 
 
@@ -165,18 +192,26 @@ def check_environment(db_path: str = DEFAULT_DB_PATH) -> dict:
         "use_delayed_data": os.getenv("IBKR_USE_DELAYED_DATA") or "true",
         "ib_insync_available": bool(packages.get("ib-insync", {}).get("available")),
     }
+    startup_readiness = check_runtime_readiness({"DATABASE_PATH": db_path}, include_live_checks=False)
+    macro_risk = evaluate_macro_risk()
 
     return {
-        "ok": not errors,
+        "ok": not errors and bool(startup_readiness.get("ok")),
         "timestamp": _now_iso(),
         "python_version": platform.python_version(),
         "packages": packages,
         "env_vars": env_vars,
         "selected_providers": selected_providers,
         "ibkr": ibkr_config,
+        "startup_readiness": startup_readiness,
+        "macro_risk": macro_risk,
+        "database_readiness": startup_readiness.get("categories", {}).get("database_ready"),
+        "provider_config_readiness": startup_readiness.get("categories", {}).get("providers_configured"),
+        "options_blocked_status": startup_readiness.get("categories", {}).get("options_ready"),
+        "safety_warnings": startup_readiness.get("warnings", []),
         "database": database,
         "app": app_status,
         "cli": cli_status,
-        "warnings": warnings,
-        "errors": errors,
+        "warnings": warnings + list(startup_readiness.get("warnings", [])),
+        "errors": errors + list(startup_readiness.get("errors", [])) if not startup_readiness.get("ok") else errors,
     }

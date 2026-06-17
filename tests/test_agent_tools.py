@@ -752,6 +752,8 @@ def test_run_trading_brain_tool_routes_all_modes(monkeypatch):
 
     assert weekly["ok"] is True
     assert weekly["data"]["mode"] == "weekly_trade_hunt"
+    assert weekly["data"]["gemini_validation"]["validation_status"] == "not_run"
+    assert weekly["data"]["gemini_validation"]["gemini_called"] is False
     assert review["ok"] is True
     assert review["data"]["mode"] == "review_ticker"
     assert monitor["ok"] is True
