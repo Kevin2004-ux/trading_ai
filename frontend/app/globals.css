@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  font-family: "Aptos", "Segoe UI", sans-serif;
+}
+
+h1,
+h2,
+h3,
+.display-face {
+  font-family: "Fraunces", "Georgia", serif;
+}
+
+::selection {
+  background: #d6a84f;
+  color: #17201b;
+}
+
+.table-shell {
+  overflow: auto;
+  border-radius: 1.5rem;
+  border: 1px solid rgba(214, 205, 188, 0.9);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.data-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+
+.data-table th {
+  background: rgba(23, 32, 27, 0.06);
+  padding: 0.9rem;
+  text-align: left;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #546b49;
+}
+
+.data-table td {
+  border-top: 1px solid rgba(214, 205, 188, 0.8);
+  padding: 0.9rem;
+  vertical-align: top;
+  font-size: 0.9rem;
+}
