@@ -13,6 +13,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Frontend build and dependency artifacts
+frontend/.next/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+frontend/.env.local
+
 # Local data and model files
 *.pth
 *.parquet

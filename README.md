@@ -37,6 +37,7 @@ Key directories:
 - `tracking/`, `db/`, `journal/`: SQLite trade records, migrations, audit/checkpoints, and reviews.
 - `reports/`, `alerts/`, `simulation/`, `analytics/`: diagnostics and feedback loops.
 - `ui/`: FastAPI app and dashboard routes.
+- `frontend/`: Next.js dashboard that consumes the FastAPI API; it contains no trading logic.
 - `cli.py`: operational command entrypoint.
 
 See `docs/ARCHITECTURE.md` for a fuller subsystem map.
@@ -116,6 +117,39 @@ Manual IBKR diagnostics, only when TWS is open:
 .venv/bin/python cli.py ibkr-diagnose --ticker AAPL --pretty
 .venv/bin/python cli.py ibkr-options-diagnose --ticker AAPL --pretty
 ```
+
+## FastAPI And Next.js Dashboard
+
+Start the FastAPI backend from the repo root:
+
+```bash
+.venv/bin/python -m uvicorn ui.app:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Install and run the Next.js dashboard:
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+The frontend uses:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+Local URLs:
+
+- FastAPI backend: `http://127.0.0.1:8000`
+- Next.js dashboard: `http://localhost:3000`
+
+For Vercel or another static/Node host, deploy `frontend/` and set
+`NEXT_PUBLIC_API_BASE_URL` to the publicly reachable FastAPI backend URL. The dashboard is
+read-only/paper-trading oriented and delegates all decisions, scans, logging, and diagnostics to
+the backend.
 
 ## Paper Trading
 

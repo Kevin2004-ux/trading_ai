@@ -45,6 +45,24 @@ def test_ui_app_exposes_expected_route_paths():
     assert "/trades/open" in route_paths
     assert "/trades/performance" in route_paths
     assert "/trades/update-outcomes" in route_paths
+    assert "/api/status" in route_paths
+    assert "/api/frontend-debug" in route_paths
+    assert "/api/readiness" in route_paths
+    assert "/api/db-status" in route_paths
+    assert "/api/trades" in route_paths
+    assert "/api/trades/{recommendation_id}" in route_paths
+    assert "/api/performance" in route_paths
+    assert "/api/alerts" in route_paths
+    assert "/api/jobs" in route_paths
+    assert "/api/reports/performance" in route_paths
+    assert "/api/stress/scenarios" in route_paths
+    assert "/api/chat" in route_paths
+    assert "/api/scan" in route_paths
+    assert "/api/options/strategies" in route_paths
+    assert "/api/annotations" in route_paths
+    assert "/api/system/config-check" in route_paths
+    assert "/api/system/readiness-check" in route_paths
+    assert "/api/system/live-dry-run" in route_paths
     assert "/trade/execute" not in route_paths
     assert "/orders" not in route_paths
     assert "/buy" not in route_paths
@@ -487,3 +505,153 @@ def test_journal_reviews_route_returns_reviews(monkeypatch):
     assert response.json()["count"] == 1
     assert captured["recommendation_id"] == 1
     assert captured["ticker"] == "AAPL"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_route_returns_structured_assistant_response(monkeypatch):
+    monkeypatch.setattr("ui.app.ask_translator", lambda message: f"answer: {message}")
+
+    response = client.post("/api/chat", json={"message": "Review AAPL"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["paper_trading_only"] is True
+    assert payload["validation"]["deterministic_engine_source_of_truth"] is True
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_returns_deterministic_fallback_when_gemini_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "ui.app.ask_translator",
+        lambda message: "Sorry, the AI translator is unavailable right now because the Gemini runtime is not fully configured.",
+    )
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+
+    response = client.post("/api/chat", json={"message": "Find the best trades this week"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["mode"] == "deterministic_fallback"
+    assert payload["gemini_available"] is False
+    assert payload["suggested_action"]["endpoint"] == "/api/scan"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_trades_route_returns_trade_history(monkeypatch):
+    monkeypatch.setattr("ui.app.get_trade_history", lambda db_path="strategy_library.db": [{"id": 1, "ticker": "AAPL"}])
+
+    response = client.get("/api/trades")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["trades"][0]["ticker"] == "AAPL"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test_environment.")
+def test_api_trade_detail_route_returns_recommendation(monkeypatch):
+    monkeypatch.setattr("ui.app.get_recommendation", lambda recommendation_id, db_path="strategy_library.db": {"id": recommendation_id, "ticker": "AAPL"})
+    monkeypatch.setattr("ui.app.get_trade_reviews", lambda **kwargs: {"ok": True, "reviews": []})
+
+    response = client.get("/api/trades/1")
+
+    assert response.status_code == 200
+    assert response.json()["trade"]["id"] == 1
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_options_strategies_route_uses_backend_builder(monkeypatch):
+    monkeypatch.setattr("ui.app.get_market_snapshot", lambda ticker, lookback_days=180: {"ok": True, "data": {"technical_snapshot": {"current_price": 100}}})
+    monkeypatch.setattr("ui.app.get_options_chain", lambda ticker: {"ok": True, "data": {"contracts": [{"option_contract": "AAPL260717C00100000"}]}})
+    monkeypatch.setattr(
+        "ui.app.build_option_strategy_candidates",
+        lambda ticker, view, contracts: {
+            "ok": True,
+            "ticker": ticker,
+            "strategies": [{"strategy_type": "long_call", "status": "research_only"}],
+            "summary": {"research_only_count": 1},
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+    response = client.post("/api/options/strategies", json={"ticker": "AAPL"})
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["strategy_result"]["strategies"][0]["status"] == "research_only"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_options_strategies_returns_blocked_payload_when_chain_unavailable(monkeypatch):
+    monkeypatch.setattr("ui.app.get_market_snapshot", lambda ticker, lookback_days=180: {"ok": True, "data": {"technical_snapshot": {"current_price": 100}}})
+    monkeypatch.setattr("ui.app.get_options_chain", lambda ticker: {"ok": False, "data": {"contracts": []}, "error": "IBKR option quotes unavailable: OPRA permission missing."})
+    monkeypatch.setattr(
+        "ui.app.build_option_strategy_candidates",
+        lambda ticker, view, contracts: {
+            "ok": False,
+            "ticker": ticker,
+            "strategies": [],
+            "summary": {"blocked_count": 0},
+            "warnings": ["Option chain is empty or malformed."],
+            "errors": ["Option chain is empty or malformed."],
+        },
+    )
+
+    response = client.post("/api/options/strategies", json={"ticker": "AAPL"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert "Cannot run the event loop" not in str(payload)
+    assert payload["paper_trading_only"] is True
+    assert "OPRA permission" in payload["warnings"][-1]
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_annotation_route_saves_human_annotation(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "ui.app.add_human_annotation",
+        lambda **kwargs: captured.update(kwargs) or {"ok": True, "annotation": {"ticker": kwargs["ticker"]}, "error": None},
+    )
+
+    response = client.post("/api/annotations", json={"ticker": "AAPL", "notes": "Good process"})
+
+    assert response.status_code == 200
+    assert response.json()["annotation"]["ticker"] == "AAPL"
+    assert captured["notes"] == "Good process"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_system_routes_return_structured_payloads(monkeypatch):
+    monkeypatch.setattr("ui.app.validate_startup_config", lambda config=None: {"ok": True, "checks": [], "warnings": [], "errors": []})
+    monkeypatch.setattr("ui.app.check_runtime_readiness", lambda config=None, include_live_checks=False: {"ok": True, "categories": {}, "warnings": [], "errors": []})
+    monkeypatch.setattr("ui.app.run_provider_dry_run", lambda **kwargs: {"ok": True, "checks": {}, "warnings": [], "errors": []})
+
+    assert client.post("/api/system/config-check", json={}).json()["ok"] is True
+    assert client.post("/api/system/readiness-check", json={}).json()["ok"] is True
+    assert client.post("/api/system/live-dry-run", json={"ticker": "AAPL"}).json()["ok"] is True
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_status_and_frontend_debug_are_safe(monkeypatch):
+    monkeypatch.setattr("ui.app.check_runtime_readiness", lambda config=None, include_live_checks=False: {"ok": True, "categories": {}, "warnings": [], "errors": []})
+    monkeypatch.setattr("ui.app.get_paper_trading_summary", lambda db_path="strategy_library.db": {"ok": True, "summary": {}})
+    monkeypatch.setattr("ui.app.list_alerts", lambda **kwargs: {"ok": True, "alerts": []})
+    monkeypatch.setattr("ui.app.get_win_loss_record", lambda db_path="strategy_library.db": {"ok": True})
+    monkeypatch.setattr("ui.app.get_strategy_performance", lambda db_path="strategy_library.db": {"ok": True})
+    monkeypatch.setattr("ui.app.validate_schema", lambda db_path="strategy_library.db": {"ok": True, "errors": []})
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+
+    status = client.get("/api/status").json()
+    debug = client.get("/api/frontend-debug").json()
+
+    assert status["ok"] is True
+    assert status["backend"] == "running"
+    assert status["brokerage_execution_enabled"] is False
+    assert status["frontend_bridge"] == "ready"
+    assert debug["ok"] is True
+    assert debug["secrets_exposed"] is False
+    assert "GEMINI_API_KEY" not in str(debug)

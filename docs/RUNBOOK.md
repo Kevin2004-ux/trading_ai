@@ -187,6 +187,66 @@ Dashboard:
 http://127.0.0.1:8000/
 ```
 
+The FastAPI app also exposes JSON routes for the standalone Next.js dashboard:
+
+- `GET /api/status`
+- `GET /api/readiness`
+- `GET /api/db-status`
+- `GET /api/trades`
+- `GET /api/trades/{id}`
+- `GET /api/performance`
+- `GET /api/alerts`
+- `GET /api/jobs`
+- `GET /api/reports/performance`
+- `GET /api/stress/scenarios`
+- `POST /api/chat`
+- `POST /api/scan`
+- `POST /api/options/strategies`
+- `POST /api/annotations`
+- `POST /api/system/config-check`
+- `POST /api/system/readiness-check`
+- `POST /api/system/live-dry-run`
+
+These API routes do not place trades. They expose paper-trading, diagnostics, reports, annotations,
+and research-only options data to the frontend.
+
+## 6A. Start The Next.js Frontend
+
+The standalone dashboard lives in `frontend/`. It contains no trading logic and calls FastAPI
+through `NEXT_PUBLIC_API_BASE_URL`.
+
+Install and run locally:
+
+```bash
+cd /Users/kevinfrederick/trading_ai/frontend
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+Default frontend URL:
+
+```text
+http://localhost:3000
+```
+
+Default frontend environment:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+Validate the frontend:
+
+```bash
+npm run lint
+npm run build
+```
+
+For Vercel, deploy the `frontend/` directory and set `NEXT_PUBLIC_API_BASE_URL` to the deployed
+FastAPI backend URL. Keep the FastAPI backend separately hosted because scans, paper logs, SQLite
+access, diagnostics, IBKR/Polygon/FMP checks, and reports all execute server-side in Python.
+
 ## 7. Live-Readiness Dry Runs
 
 Run a provider availability dry run:
