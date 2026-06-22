@@ -31,6 +31,7 @@ from journal.trade_journal import (  # noqa: E402
 )
 from jobs.job_history import list_job_runs  # noqa: E402
 from jobs.job_registry import list_registered_jobs  # noqa: E402
+from ideas import build_best_available_ideas, format_best_ideas_response  # noqa: E402
 from memory.annotation_store import add_human_annotation  # noqa: E402
 from options.strategy_builder import build_option_strategy_candidates  # noqa: E402
 from paper.paper_trader import (  # noqa: E402
@@ -223,8 +224,74 @@ def _is_gemini_dead_end(answer: str) -> bool:
 
 def _is_trade_question(message: str) -> bool:
     normalized = str(message or "").lower()
-    terms = ("best trade", "best trades", "find", "scan", "setup", "recommend", "opportunity", "weekly")
-    return any(term in normalized for term in terms)
+    normalized_compact = normalized.replace("-", " ")
+    terms = (
+        "best available",
+        "best available stock",
+        "best available stocks",
+        "best stock",
+        "best stocks",
+        "best stock ideas",
+        "stock idea",
+        "stock ideas",
+        "stocks to watch",
+        "watchlist idea",
+        "watchlist ideas",
+        "blocked but interesting",
+        "best option",
+        "best options",
+        "top stock",
+        "top stock ideas",
+        "top pick",
+        "top picks",
+        "trade idea",
+        "trade ideas",
+        "what should i watch",
+        "review market",
+        "best trade",
+        "best trades",
+        "find",
+        "scan",
+        "setup",
+        "recommend",
+        "opportunity",
+        "weekly",
+    )
+    return any(term in normalized_compact for term in terms)
+
+
+def _is_stock_only_request(message: str) -> bool:
+    normalized = str(message or "").lower()
+    normalized_compact = normalized.replace("-", " ")
+    stock_terms = (
+        "stock only",
+        "stocks only",
+        "equities only",
+        "equity only",
+        "stock idea",
+        "stock ideas",
+        "stocks to watch",
+        "best available stock",
+        "best stocks",
+        "best stock",
+        "top stock",
+    )
+    no_option_terms = (
+        "do not include options",
+        "don't include options",
+        "no options",
+        "without options",
+        "exclude options",
+    )
+    return any(term in normalized_compact for term in stock_terms) or any(term in normalized for term in no_option_terms)
+
+
+def _wants_options_request(message: str) -> bool:
+    normalized = str(message or "").lower()
+    if _is_stock_only_request(message):
+        return False
+    option_terms = ("option", "options", "calls", "puts", "spread", "spreads")
+    return any(term in normalized for term in option_terms)
 
 
 def _sanitize_runtime_reason(reason: str | None) -> str | None:
@@ -289,9 +356,104 @@ def _deterministic_chat_fallback(message: str, reason: str | None = None) -> dic
     }
 
 
+def _enrich_with_best_ideas(result: dict, include_options: bool = True) -> dict:
+    if not isinstance(result, dict):
+        return result
+    enriched = dict(result)
+    best_ideas = build_best_available_ideas(enriched, config={"include_options": include_options})
+    enriched["best_available_ideas"] = best_ideas
+    enriched["formatted_best_ideas_summary"] = format_best_ideas_response(best_ideas)
+    return enriched
+
+
+def _run_paper_cycle_payload(request: PaperCycleRequest) -> dict:
+    result = run_paper_trade_cycle(
+        universe=request.universe,
+        max_tickers=request.max_tickers,
+        profiles=request.profiles,
+        max_trades=request.max_trades,
+        min_trades=request.min_trades,
+        include_catalysts=request.include_catalysts,
+        include_market_regime=request.include_market_regime,
+        include_relative_strength=request.include_relative_strength,
+        include_options=request.include_options,
+        prefer_options=request.prefer_options,
+        max_option_contracts_per_trade=request.max_option_contracts_per_trade,
+        include_portfolio_risk=request.include_portfolio_risk,
+        include_position_sizing=request.include_position_sizing,
+        include_memory_context=request.include_memory_context,
+        store_memory=request.store_memory,
+        account_size=request.account_size,
+        risk_mode=request.risk_mode,
+        db_path=request.db_path,
+    )
+    return _enrich_with_best_ideas(result, include_options=request.include_options)
+
+
+def _run_best_ideas_chat_scan(message: str, db_path: str) -> dict:
+    wants_options = _wants_options_request(message)
+    request = PaperCycleRequest(
+        universe="mega_cap",
+        max_tickers=25,
+        max_trades=2,
+        min_trades=0,
+        include_options=wants_options,
+        prefer_options=False,
+        include_market_regime=True,
+        include_relative_strength=True,
+        include_portfolio_risk=True,
+        include_position_sizing=True,
+        db_path=db_path,
+    )
+    scan_result = _run_paper_cycle_payload(request)
+    best_ideas = scan_result.get("best_available_ideas") if isinstance(scan_result, dict) else None
+    if not isinstance(best_ideas, dict):
+        best_ideas = build_best_available_ideas(scan_result if isinstance(scan_result, dict) else {})
+    return {
+        "scan_result": scan_result,
+        "best_available_ideas": best_ideas,
+        "formatted_best_ideas_summary": format_best_ideas_response(best_ideas),
+        "include_options": wants_options,
+    }
+
+
 def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
-    del db_path  # Reserved for future deterministic context lookups.
     init_error = get_model_init_error()
+    if _is_trade_question(message):
+        best_ideas_payload = _run_best_ideas_chat_scan(message, db_path=db_path)
+        best_ideas = best_ideas_payload["best_available_ideas"]
+        answer = best_ideas_payload["formatted_best_ideas_summary"]
+        mode = "deterministic_fallback" if init_error else "deterministic_scan"
+        warnings = list(best_ideas.get("warnings", []))
+        if init_error:
+            warnings.append("Gemini is unavailable; deterministic scan and formatter were used.")
+        else:
+            warnings.append("Deterministic scan ran first; Gemini did not override the buckets.")
+        return {
+            "ok": True,
+            "mode": mode,
+            "answer": answer,
+            "gemini_available": init_error is None,
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "best_available_ideas": best_ideas,
+            "scan_result": best_ideas_payload["scan_result"],
+            "formatted_best_ideas_summary": answer,
+            "validation": {
+                "validation_status": mode,
+                "safe_to_show_user": True,
+                "deterministic_engine_source_of_truth": True,
+                "deterministic_fallback_used": init_error is not None,
+            },
+            "raw_result": {
+                "message": message,
+                "gemini_status": "available" if init_error is None else "unavailable",
+                "include_options": best_ideas_payload["include_options"],
+            },
+            "warnings": warnings,
+            "errors": [],
+        }
+
     answer = ask_translator(message)
     if _is_gemini_dead_end(answer):
         return _deterministic_chat_fallback(message, reason=init_error or answer)
@@ -737,27 +899,7 @@ async def trades_update_outcomes(request: UpdateOutcomesRequest):
 
 @app.post("/paper/cycle")
 async def paper_cycle(request: PaperCycleRequest):
-    result = await run_blocking_backend_call(
-        run_paper_trade_cycle,
-        universe=request.universe,
-        max_tickers=request.max_tickers,
-        profiles=request.profiles,
-        max_trades=request.max_trades,
-        min_trades=request.min_trades,
-        include_catalysts=request.include_catalysts,
-        include_market_regime=request.include_market_regime,
-        include_relative_strength=request.include_relative_strength,
-        include_options=request.include_options,
-        prefer_options=request.prefer_options,
-        max_option_contracts_per_trade=request.max_option_contracts_per_trade,
-        include_portfolio_risk=request.include_portfolio_risk,
-        include_position_sizing=request.include_position_sizing,
-        include_memory_context=request.include_memory_context,
-        store_memory=request.store_memory,
-        account_size=request.account_size,
-        risk_mode=request.risk_mode,
-        db_path=request.db_path,
-    )
+    result = await run_blocking_backend_call(_run_paper_cycle_payload, request)
     if not result.get("ok"):
         return _error_response(_extract_error(result, "Paper trading cycle failed."))
     return result

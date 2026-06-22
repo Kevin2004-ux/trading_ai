@@ -140,6 +140,31 @@ def test_strong_ticker_passes_and_is_ranked(monkeypatch, tmp_path):
     assert result["passed_candidates"][0]["recommendation_status"] in {"recommendable", "watchlist"}
 
 
+def test_latest_completed_session_bar_does_not_block_stock_candidate(monkeypatch, tmp_path):
+    snapshot = _market_snapshot("AAPL", freshness_label="latest_completed_session")
+    snapshot["data"]["data_freshness"].update(
+        {
+            "latest_bar_timestamp": "2026-06-18T00:00:00+00:00",
+            "age_days": 4.1,
+            "is_stale": False,
+            "market_session": {
+                "is_latest_completed_session": True,
+                "is_stale_by_session": False,
+                "latest_expected_completed_session": "2026-06-18",
+            },
+        }
+    )
+
+    monkeypatch.setattr("scanner.swing_scanner.get_market_snapshot", lambda ticker, lookback_days=180: snapshot)
+
+    result = scan_swing_candidates(["AAPL"], db_path=str(tmp_path / "scanner.db"))
+
+    assert result["total_passed"] == 1
+    assert result["total_rejected"] == 0
+    assert result["passed_candidates"][0]["data_quality"]["quality_label"] == "good"
+    assert result["passed_candidates"][0]["data_freshness"]["freshness_label"] == "latest_completed_session"
+
+
 def test_scanner_includes_technical_confirmation_summary(monkeypatch, tmp_path):
     snapshot = _market_snapshot("AAPL")
     snapshot["data"]["bars"] = _bars()

@@ -73,6 +73,43 @@ def test_allow_options_without_quotes_blocks(tmp_path):
     assert any("ALLOW_OPTIONS_WITHOUT_QUOTES" in error for error in result["errors"])
 
 
+def test_unvalidated_option_quotes_are_warning_only_for_stock_capable_scans(tmp_path):
+    result = validate_startup_config(_base(tmp_path, INCLUDE_OPTIONS="true", OPTION_QUOTES_VALIDATED="false"))
+
+    assert result["ok"] is True
+    assert result["safe_to_run_paper_cycle"] is True
+    assert result["safe_to_run_options"] is False
+    assert any("option quotes have not been validated" in warning.lower() for warning in result["warnings"])
+    assert not any("option quotes have not been validated" in error.lower() for error in result["errors"])
+
+
+def test_stock_only_request_overrides_globally_enabled_options(tmp_path):
+    result = validate_startup_config(
+        _base(
+            tmp_path,
+            ENABLE_OPTIONS="true",
+            INCLUDE_OPTIONS="false",
+            STOCK_ONLY="true",
+            OPTION_QUOTES_VALIDATED="false",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["readiness"] in {"ready", "ready_with_warnings"}
+    assert result["safe_to_run_paper_cycle"] is True
+    assert result["safe_to_run_options"] is False
+    assert not any("option quotes have not been validated" in error.lower() for error in result["errors"])
+    assert any(check["name"] == "request_instrument_scope" and "Stock-only" in check["message"] for check in result["checks"])
+
+
+def test_options_only_unvalidated_quotes_blocks_startup(tmp_path):
+    result = validate_startup_config(_base(tmp_path, INCLUDE_OPTIONS="true", OPTIONS_ONLY="true", OPTION_QUOTES_VALIDATED="false"))
+
+    assert result["ok"] is False
+    assert result["safe_to_run_paper_cycle"] is False
+    assert any("option quotes have not been validated" in error.lower() for error in result["errors"])
+
+
 def test_missing_gemini_key_warns_when_optional(tmp_path):
     result = validate_startup_config(_base(tmp_path, GEMINI_API_KEY=""))
 

@@ -141,3 +141,33 @@ def test_stress_testing_disabled_is_reported_without_blocking_scan(tmp_path):
     assert result["ok"] is True
     assert result["categories"]["stress_testing_ready"]["ok"] is False
     assert result["categories"]["scan_runtime_ready"]["ok"] is True
+
+
+def test_options_unvalidated_does_not_block_stock_scan_runtime(tmp_path):
+    config = _base(tmp_path, INCLUDE_OPTIONS="true", OPTION_QUOTES_VALIDATED="false")
+    apply_pending_migrations(config["DATABASE_PATH"])
+
+    result = check_runtime_readiness(config, include_live_checks=False)
+
+    assert result["ok"] is True
+    assert result["categories"]["scan_runtime_ready"]["ok"] is True
+    assert result["categories"]["options_ready"]["ok"] is False
+    assert any("option quotes have not been validated" in warning.lower() for warning in result["warnings"])
+
+
+def test_stock_only_runtime_ignores_globally_enabled_unvalidated_options(tmp_path):
+    config = _base(
+        tmp_path,
+        ENABLE_OPTIONS="true",
+        INCLUDE_OPTIONS="false",
+        STOCK_ONLY="true",
+        OPTION_QUOTES_VALIDATED="false",
+    )
+    apply_pending_migrations(config["DATABASE_PATH"])
+
+    result = check_runtime_readiness(config, include_live_checks=False)
+
+    assert result["ok"] is True
+    assert result["categories"]["scan_runtime_ready"]["ok"] is True
+    assert result["categories"]["options_ready"]["ok"] is False
+    assert not any("option quotes have not been validated" in error.lower() for error in result["errors"])

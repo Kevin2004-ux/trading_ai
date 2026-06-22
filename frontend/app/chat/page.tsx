@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { apiPost, asRecord } from "@/lib/api";
+import { apiPost, asList, asRecord } from "@/lib/api";
 import { Badge } from "@/components/Badge";
 import { JsonPanel } from "@/components/JsonPanel";
 import { PageHeader } from "@/components/PageHeader";
@@ -28,7 +28,13 @@ export default function ChatPage() {
   }
 
   const validation = asRecord(result?.validation);
+  const bestIdeas = asRecord(result?.best_available_ideas);
+  const paperEligible = asList(bestIdeas.paper_eligible);
+  const stockWatchlist = asList(bestIdeas.stock_watchlist);
+  const optionResearch = asList(bestIdeas.option_research_only);
+  const blockedInteresting = asList(bestIdeas.blocked_but_interesting);
   const warnings = Array.isArray(result?.warnings) ? (result?.warnings as string[]) : [];
+  const systemIssues = Array.isArray(bestIdeas.system_issues) ? (bestIdeas.system_issues as string[]) : [];
 
   return (
     <div>
@@ -58,10 +64,40 @@ export default function ChatPage() {
             <Badge tone="neutral">Paper trading only</Badge>
           </div>
           <div className="whitespace-pre-wrap rounded-2xl bg-stone-50 p-4 text-sm leading-7">{String(result.answer ?? result.error ?? "No answer returned.")}</div>
+          {paperEligible.length || stockWatchlist.length || optionResearch.length || blockedInteresting.length ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              <IdeaMiniBucket title="Paper eligible" rows={paperEligible} />
+              <IdeaMiniBucket title="Stock watchlist" rows={stockWatchlist} />
+              <IdeaMiniBucket title="Option research-only" rows={optionResearch} />
+              <IdeaMiniBucket title="Blocked but interesting" rows={blockedInteresting} />
+            </div>
+          ) : null}
           <WarningBox title="Warnings" items={warnings} />
+          <WarningBox title="System issues" items={systemIssues} />
           <JsonPanel data={result} />
         </section>
       ) : null}
+    </div>
+  );
+}
+
+function IdeaMiniBucket({ title, rows }: { title: string; rows: Record<string, unknown>[] }) {
+  return (
+    <div className="rounded-2xl border border-stone-200 bg-white/70 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-black">{title}</h3>
+        <Badge tone={rows.length ? "research" : "neutral"}>{rows.length}</Badge>
+      </div>
+      {rows.length ? (
+        <div className="mt-3 space-y-2">
+          {rows.slice(0, 5).map((row, index) => (
+            <div key={`${row.idea_key ?? row.ticker}-${index}`} className="rounded-xl bg-stone-50 p-3 text-sm">
+              <div className="font-black">{String(row.ticker ?? row.option_contract ?? "Unknown")}</div>
+              <div className="text-stone-600">{String(row.reason ?? row.rejection_reason ?? "No reason provided.")}</div>
+            </div>
+          ))}
+        </div>
+      ) : <p className="mt-3 text-sm text-stone-600">No rows in this bucket.</p>}
     </div>
   );
 }

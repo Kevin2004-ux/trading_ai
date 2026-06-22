@@ -73,6 +73,14 @@ def _database_check(db_path: str) -> tuple[str, str, bool]:
 def validate_startup_config(config: dict | None = None) -> dict:
     checks: list[dict] = []
 
+    request_overrides_include_options = isinstance(config, dict) and "INCLUDE_OPTIONS" in config
+    include_options_requested = _bool_value(_value(config, "INCLUDE_OPTIONS", "false"))
+    stock_only = _bool_value(_value(config, "STOCK_ONLY", "false")) or (
+        request_overrides_include_options and not include_options_requested
+    )
+    prefer_options = _bool_value(_value(config, "PREFER_OPTIONS", "false"))
+    options_required = _bool_value(_value(config, "OPTIONS_REQUIRED", "false"))
+    stock_fallback_allowed = _bool_value(_value(config, "STOCK_FALLBACK_ALLOWED", "true"), default=True)
     mode = str(_value(config, "MARKET_DATA_MODE", "auto") or "auto").lower()
     market_provider = str(_value(config, "MARKET_DATA_PROVIDER", "polygon") or "polygon").lower()
     options_provider = str(_value(config, "OPTIONS_DATA_PROVIDER", "disabled") or "disabled").lower()
@@ -80,7 +88,9 @@ def validate_startup_config(config: dict | None = None) -> dict:
     live_quote_required = _bool_value(_value(config, "ALLOW_LIVE_QUOTE_REQUIRED", "false"))
     historical_fallback = _bool_value(_value(config, "ALLOW_HISTORICAL_BAR_FALLBACK", "true"), default=True)
     allow_options_without_quotes = _bool_value(_value(config, "ALLOW_OPTIONS_WITHOUT_QUOTES", "false"))
-    options_enabled = _bool_value(_value(config, "ENABLE_OPTIONS", "false")) or _bool_value(_value(config, "INCLUDE_OPTIONS", "false"))
+    options_globally_enabled = _bool_value(_value(config, "ENABLE_OPTIONS", "false"))
+    options_enabled = False if stock_only else (include_options_requested or (options_globally_enabled and not request_overrides_include_options))
+    options_only = _bool_value(_value(config, "OPTIONS_ONLY", "false")) or options_required
     gemini_enabled = _bool_value(_value(config, "ENABLE_GEMINI", "false"))
     memory_enabled = (
         _bool_value(_value(config, "MEMORY_ENABLED", "false"))
@@ -111,6 +121,17 @@ def validate_startup_config(config: dict | None = None) -> dict:
     _add_check(checks, name="market_data_provider", status="pass", message=f"Market data provider: {market_provider}")
     _add_check(checks, name="options_data_provider", status="pass", message=f"Options data provider: {options_provider}")
     _add_check(checks, name="market_data_mode", status="pass", message=f"Market data mode: {mode}")
+    _add_check(
+        checks,
+        name="request_instrument_scope",
+        status="pass",
+        message=(
+            "Stock-only request; options are ignored for startup blocking."
+            if stock_only
+            else "Options requested for this run." if options_enabled
+            else "Stock-capable request; options are disabled or research-only."
+        ),
+    )
 
     db_status, db_message, db_blocking = _database_check(db_path)
     _add_check(checks, name="database_path", status=db_status, message=db_message, blocking=db_blocking)
@@ -177,7 +198,14 @@ def validate_startup_config(config: dict | None = None) -> dict:
     if allow_options_without_quotes:
         _add_check(checks, name="allow_options_without_quotes", status="fail", message="ALLOW_OPTIONS_WITHOUT_QUOTES=true is unsafe; option recommendations require usable quotes/fills.", blocking=True)
     elif options_enabled and not option_quotes_validated:
-        _add_check(checks, name="options_quotes", status="fail", message="Options provider is enabled but option quotes have not been validated.", blocking=True)
+        option_quotes_blocking = options_only or (prefer_options and not stock_fallback_allowed)
+        _add_check(
+            checks,
+            name="options_quotes",
+            status="fail" if option_quotes_blocking else "warn",
+            message="Options provider is enabled but option quotes have not been validated; final option recommendations remain blocked.",
+            blocking=option_quotes_blocking,
+        )
     elif options_enabled:
         _add_check(checks, name="options_quotes", status="pass", message="Options are enabled and quote validation is marked true.")
     else:

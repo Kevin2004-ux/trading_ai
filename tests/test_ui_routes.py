@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 
 import pytest
 
@@ -377,6 +378,7 @@ def test_paper_cycle_route_returns_structured_result(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["mode"] == "paper_trading"
+    assert "best_available_ideas" in response.json()
     assert captured["include_options"] is True
     assert captured["prefer_options"] is True
     assert captured["max_option_contracts_per_trade"] == 2
@@ -522,11 +524,27 @@ def test_api_chat_route_returns_structured_assistant_response(monkeypatch):
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
 def test_api_chat_returns_deterministic_fallback_when_gemini_unavailable(monkeypatch):
+    captured = {}
     monkeypatch.setattr(
         "ui.app.ask_translator",
         lambda message: "Sorry, the AI translator is unavailable right now because the Gemini runtime is not fully configured.",
     )
     monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+    monkeypatch.setattr(
+        "ui.app.run_paper_trade_cycle",
+        lambda **kwargs: captured.update(kwargs) or {
+            "ok": True,
+            "mode": "paper_trading",
+            "decision_result": {"final_recommendations": []},
+            "selection_result": {
+                "watchlist_alternatives": [
+                    {"ticker": "AAPL", "asset_type": "stock", "recommendation_status": "watchlist", "score": 80, "risk_reward": 2.2}
+                ]
+            },
+            "summary": {"selected_count": 0, "logged_count": 0},
+            "errors": [],
+        },
+    )
 
     response = client.post("/api/chat", json={"message": "Find the best trades this week"})
 
@@ -535,7 +553,156 @@ def test_api_chat_returns_deterministic_fallback_when_gemini_unavailable(monkeyp
     assert payload["ok"] is True
     assert payload["mode"] == "deterministic_fallback"
     assert payload["gemini_available"] is False
-    assert payload["suggested_action"]["endpoint"] == "/api/scan"
+    assert payload["best_available_ideas"]["stock_watchlist"][0]["ticker"] == "AAPL"
+    assert captured["min_trades"] == 0
+    assert captured["include_options"] is False
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_stock_only_request_sends_include_options_false(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+
+    def fake_run_paper_trade_cycle(**kwargs):
+        asyncio.get_event_loop()
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "mode": "paper_trading",
+            "decision_result": {"final_recommendations": []},
+            "selection_result": {
+                "watchlist_alternatives": [
+                    {"ticker": "NVDA", "asset_type": "stock", "recommendation_status": "watchlist", "score": 79}
+                ]
+            },
+            "summary": {"selected_count": 0, "logged_count": 0},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        "ui.app.run_paper_trade_cycle",
+        fake_run_paper_trade_cycle,
+    )
+
+    response = client.post("/api/chat", json={"message": "Give me your best stock ideas right now. Do stock only. Do not include options."})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["include_options"] is False
+    assert captured["prefer_options"] is False
+    assert payload["raw_result"]["include_options"] is False
+    assert payload["best_available_ideas"]["option_research_only"] == []
+    assert "There is no current event loop" not in str(payload)
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Give me your best available stock ideas right now. Do stock only. Include watchlist and blocked-but-interesting ideas, but do not include options.",
+        "Show me stock ideas right now. No options.",
+        "What stocks to watch today? Equities only.",
+        "Include watchlist ideas and blocked but interesting stock setups, no options.",
+    ],
+)
+def test_api_chat_best_available_stock_ideas_trigger_deterministic_scan(monkeypatch, message):
+    captured = {}
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+
+    def fake_run_paper_trade_cycle(**kwargs):
+        asyncio.get_event_loop()
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "mode": "paper_trading",
+            "decision_result": {"final_recommendations": []},
+            "selection_result": {
+                "watchlist_alternatives": [
+                    {"ticker": "V", "asset_type": "stock", "recommendation_status": "watchlist", "score": 88, "risk_reward": 2.0}
+                ],
+                "rejected_candidates": [
+                    {"ticker": "AAPL", "asset_type": "stock", "recommendation_status": "rejected", "score": 77, "rejection_reason": "Failed relative volume."}
+                ],
+            },
+            "summary": {"selected_count": 0, "logged_count": 0},
+            "errors": [],
+        }
+
+    monkeypatch.setattr("ui.app.run_paper_trade_cycle", fake_run_paper_trade_cycle)
+
+    response = client.post("/api/chat", json={"message": message})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["mode"] == "deterministic_fallback"
+    assert captured["include_options"] is False
+    assert captured["prefer_options"] is False
+    assert payload["raw_result"]["include_options"] is False
+    assert payload["best_available_ideas"]["stock_watchlist"][0]["ticker"] == "V"
+    assert payload["best_available_ideas"]["option_research_only"] == []
+    assert "Use the Scan, Trades, Performance" not in payload["answer"]
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_options_request_can_send_include_options_true(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+    monkeypatch.setattr(
+        "ui.app.run_paper_trade_cycle",
+        lambda **kwargs: captured.update(kwargs) or {
+            "ok": True,
+            "mode": "paper_trading",
+            "decision_result": {"final_recommendations": []},
+            "selection_result": {"watchlist_alternatives": []},
+            "summary": {"selected_count": 0, "logged_count": 0},
+            "errors": [],
+        },
+    )
+
+    response = client.post("/api/chat", json={"message": "Give me the best option ideas"})
+
+    assert response.status_code == 200
+    assert captured["include_options"] is True
+    assert captured["prefer_options"] is False
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_scan_includes_best_available_ideas(monkeypatch):
+    captured = {}
+
+    def fake_run_paper_trade_cycle(**kwargs):
+        asyncio.get_event_loop()
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "mode": "paper_trading",
+            "decision_result": {"final_recommendations": []},
+            "selection_result": {
+                "watchlist_alternatives": [
+                    {"ticker": "MSFT", "asset_type": "stock", "recommendation_status": "watchlist", "score": 81, "risk_reward": 2.3}
+                ]
+            },
+            "summary": {"selected_count": 0, "logged_count": 0},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        "ui.app.run_paper_trade_cycle",
+        fake_run_paper_trade_cycle,
+    )
+
+    response = client.post("/api/scan", json={"max_tickers": 5, "min_trades": 0})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["best_available_ideas"]["stock_watchlist"][0]["ticker"] == "MSFT"
+    assert "No final paper trades" in payload["formatted_best_ideas_summary"]
+    assert captured["include_options"] is False
+    assert captured["prefer_options"] is False
+    assert "There is no current event loop" not in str(payload)
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")

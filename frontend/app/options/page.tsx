@@ -24,6 +24,8 @@ export default function OptionsPage() {
   const rows = asList(strategyResult.strategies);
   const warnings = Array.isArray(result?.warnings) ? (result?.warnings as string[]) : [];
   const errors = Array.isArray(result?.errors) ? (result?.errors as string[]) : [];
+  const optionPayloadText = JSON.stringify(result ?? {});
+  const twsUnreachable = optionPayloadText.includes("Connect call failed") || optionPayloadText.includes("ConnectionRefusedError") || optionPayloadText.includes("127.0.0.1");
 
   return (
     <div>
@@ -44,6 +46,17 @@ export default function OptionsPage() {
       </section>
       {result ? (
         <>
+          {twsUnreachable ? (
+            <div className="mt-6">
+              <WarningBox
+                title="IBKR/TWS unavailable"
+                items={[
+                  "IBKR/TWS is not reachable on 127.0.0.1:7496. Option contracts cannot be evaluated yet.",
+                  "Research-only option ideas require option chain, bid/ask, IV, Greeks, and fill quality."
+                ]}
+              />
+            </div>
+          ) : null}
           <div className="mt-6"><WarningBox title="Option warnings" items={warnings} /></div>
           <div className="mt-4"><WarningBox title="Option errors / blocked reasons" items={errors} /></div>
           <section className="mt-6 rounded-3xl bg-white/75 p-5 shadow-card">

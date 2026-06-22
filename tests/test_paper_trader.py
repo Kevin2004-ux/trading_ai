@@ -112,6 +112,107 @@ def test_run_paper_trade_cycle_returns_counts_when_no_trades_selected(monkeypatc
     assert result["summary"]["data_quality"]["worst_quality_label"] == "unavailable"
 
 
+def test_stock_only_paper_cycle_not_blocked_by_unvalidated_option_quotes(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "paper_cycle_stock_only_options_unvalidated.db")
+    captured = {}
+    monkeypatch.setattr(
+        "paper.paper_trader.run_weekly_trade_hunt",
+        lambda **kwargs: captured.update(kwargs) or {
+            "ok": True,
+            "mode": "weekly_trade_hunt",
+            "scan_result": {},
+            "decision_result": {"final_recommendations": [], "logged_recommendations": []},
+            "errors": [],
+        },
+    )
+
+    result = run_paper_trade_cycle(
+        include_options=False,
+        prefer_options=False,
+        startup_config={
+            "OPTIONS_DATA_PROVIDER": "ibkr",
+            "OPTION_QUOTES_VALIDATED": "false",
+            "ALLOW_OPTIONS_WITHOUT_QUOTES": "false",
+        },
+        db_path=db_path,
+    )
+
+    assert result["ok"] is True
+    assert result["trade_hunt"] is not None
+    assert captured["include_options"] is False
+    assert captured["prefer_options"] is False
+
+
+def test_stock_only_paper_cycle_overrides_globally_enabled_unvalidated_options(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "paper_cycle_stock_only_global_options.db")
+    captured = {}
+    monkeypatch.setattr(
+        "paper.paper_trader.run_weekly_trade_hunt",
+        lambda **kwargs: captured.update(kwargs) or {
+            "ok": True,
+            "mode": "weekly_trade_hunt",
+            "scan_result": {"rejected_candidates": [{"ticker": "AAPL", "score": 55, "rejection_reason": "Data stale."}]},
+            "decision_result": {"final_recommendations": [], "logged_recommendations": []},
+            "errors": [],
+        },
+    )
+
+    result = run_paper_trade_cycle(
+        include_options=False,
+        prefer_options=False,
+        startup_config={
+            "ENABLE_OPTIONS": "true",
+            "OPTIONS_DATA_PROVIDER": "ibkr",
+            "OPTION_QUOTES_VALIDATED": "false",
+            "ALLOW_OPTIONS_WITHOUT_QUOTES": "false",
+        },
+        db_path=db_path,
+    )
+
+    assert result["ok"] is True
+    assert result["startup_readiness"]["ok"] is True
+    assert result["startup_readiness"]["safe_to_run_paper_cycle"] is True
+    assert result["startup_readiness"]["safe_to_run_options"] is False
+    assert result["trade_hunt"] is not None
+    assert captured["include_options"] is False
+    assert not any("option quotes have not been validated" in error.lower() for error in result["startup_readiness"]["errors"])
+
+
+def test_run_paper_trade_cycle_passes_stock_only_context_to_startup_validation(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "paper_cycle_validation_context.db")
+    captured = {}
+
+    def fake_validate_startup_config(config):
+        captured.update(config)
+        return {
+            "ok": True,
+            "readiness": "ready_with_warnings",
+            "warnings": [],
+            "errors": [],
+            "safe_to_run_paper_cycle": True,
+            "safe_to_run_options": False,
+        }
+
+    monkeypatch.setattr("paper.paper_trader.validate_startup_config", fake_validate_startup_config)
+    monkeypatch.setattr(
+        "paper.paper_trader.run_weekly_trade_hunt",
+        lambda **kwargs: {
+            "ok": True,
+            "mode": "weekly_trade_hunt",
+            "decision_result": {"final_recommendations": [], "logged_recommendations": []},
+            "errors": [],
+        },
+    )
+
+    result = run_paper_trade_cycle(include_options=False, prefer_options=False, db_path=db_path)
+
+    assert result["ok"] is True
+    assert captured["INCLUDE_OPTIONS"] == "false"
+    assert captured["PREFER_OPTIONS"] == "false"
+    assert captured["STOCK_ONLY"] == "true"
+    assert captured["OPTIONS_REQUIRED"] == "false"
+
+
 def test_run_paper_trade_cycle_includes_partial_async_scan_summary(monkeypatch, tmp_path):
     db_path = str(tmp_path / "paper_cycle_async.db")
     scan_execution_summary = {

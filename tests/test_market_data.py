@@ -89,6 +89,41 @@ def test_get_data_freshness_flags_stale_data():
     assert freshness["age_days"] > 7
 
 
+def test_get_data_freshness_accepts_latest_completed_session_on_weekend():
+    bars_df = _sample_bars(40)
+    bars_df["timestamp"] = pd.date_range(end=pd.Timestamp("2026-01-09T00:00:00Z"), periods=40, freq="B")
+
+    freshness = get_data_freshness(bars_df, now=pd.Timestamp("2026-01-11T12:00:00-05:00"))
+
+    assert freshness["ok"] is True
+    assert freshness["is_stale"] is False
+    assert freshness["freshness_label"] == "latest_completed_session"
+    assert freshness["market_session"]["latest_expected_completed_session"] == "2026-01-09"
+
+
+def test_get_data_freshness_accepts_thursday_after_juneteenth_weekend():
+    bars_df = _sample_bars(40)
+    bars_df["timestamp"] = pd.date_range(end=pd.Timestamp("2026-06-18T00:00:00Z"), periods=40, freq="B")
+
+    freshness = get_data_freshness(bars_df, now=pd.Timestamp("2026-06-21T12:00:00-04:00"))
+
+    assert freshness["is_stale"] is False
+    assert freshness["freshness_label"] == "latest_completed_session"
+    assert freshness["market_session"]["latest_expected_completed_session"] == "2026-06-18"
+    assert freshness["age_days"] > 3
+
+
+def test_get_data_freshness_flags_bar_older_than_expected_session():
+    bars_df = _sample_bars(40)
+    bars_df["timestamp"] = pd.date_range(end=pd.Timestamp("2026-06-17T00:00:00Z"), periods=40, freq="B")
+
+    freshness = get_data_freshness(bars_df, now=pd.Timestamp("2026-06-21T12:00:00-04:00"))
+
+    assert freshness["is_stale"] is True
+    assert freshness["freshness_label"] == "stale"
+    assert freshness["market_session"]["latest_expected_completed_session"] == "2026-06-18"
+
+
 def test_malformed_ohlcv_is_handled_gracefully():
     malformed_df = pd.DataFrame(
         {

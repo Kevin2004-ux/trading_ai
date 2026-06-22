@@ -8,6 +8,7 @@ import pandas as pd
 import requests
 
 import config
+from market.calendar import is_latest_completed_session
 from providers.market_data_provider import is_ibkr_market_data_provider
 from quality.data_quality import validate_market_data_quality
 
@@ -87,6 +88,15 @@ def _to_timestamp_series(series: pd.Series) -> pd.Series:
         return pd.to_datetime(numeric_series, unit=unit, errors="coerce", utc=True)
 
     return pd.to_datetime(series, errors="coerce", utc=True)
+
+
+def _reference_timestamp(now: Any = None) -> pd.Timestamp:
+    if now is None:
+        return pd.Timestamp.now(tz="UTC")
+    timestamp = pd.Timestamp(now)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
 
 
 def _safe_float(value: Any) -> float | None:
@@ -324,7 +334,7 @@ def calculate_technical_snapshot(bars_df: pd.DataFrame) -> dict:
     }
 
 
-def get_data_freshness(bars_df: pd.DataFrame) -> dict:
+def get_data_freshness(bars_df: pd.DataFrame, now: Any = None) -> dict:
     normalized = normalize_ohlcv(bars_df)
     if normalized.empty:
         return {
@@ -334,6 +344,8 @@ def get_data_freshness(bars_df: pd.DataFrame) -> dict:
             "age_days": None,
             "is_stale": True,
             "freshness_label": "unknown",
+            "market_session": None,
+            "warnings": [],
         }
 
     latest_timestamp = pd.Timestamp(normalized["timestamp"].iloc[-1])
@@ -342,18 +354,26 @@ def get_data_freshness(bars_df: pd.DataFrame) -> dict:
     else:
         latest_timestamp = latest_timestamp.tz_convert("UTC")
 
-    age_days = (pd.Timestamp.now(tz="UTC") - latest_timestamp).total_seconds() / 86400.0
+    reference_now = _reference_timestamp(now)
+    age_days = (reference_now - latest_timestamp).total_seconds() / 86400.0
     age_days = round(age_days, 2)
+    session_status = is_latest_completed_session(latest_timestamp.to_pydatetime(), now=reference_now.to_pydatetime())
+    warnings: list[str] = []
 
-    if age_days <= 3:
+    if session_status.get("is_latest_completed_session"):
+        freshness_label = "latest_completed_session"
+        is_stale = False
+        if age_days > 3:
+            warnings.append("Latest bar is the latest completed market session despite a weekend/holiday calendar gap.")
+    elif not session_status.get("is_stale_by_session", True) and age_days <= 3:
         freshness_label = "fresh"
         is_stale = False
-    elif age_days <= 7:
-        freshness_label = "slightly_stale"
-        is_stale = False
-    else:
+    elif session_status.get("is_stale_by_session"):
         freshness_label = "stale"
         is_stale = True
+    else:
+        freshness_label = "slightly_stale" if age_days <= 7 else "stale"
+        is_stale = freshness_label == "stale"
 
     return {
         "ok": True,
@@ -362,6 +382,8 @@ def get_data_freshness(bars_df: pd.DataFrame) -> dict:
         "age_days": age_days,
         "is_stale": is_stale,
         "freshness_label": freshness_label,
+        "market_session": session_status,
+        "warnings": warnings,
     }
 
 

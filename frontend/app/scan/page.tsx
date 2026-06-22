@@ -37,9 +37,14 @@ export default function ScanPage() {
   const decision = asRecord(result?.decision_result);
   const selection = asRecord(result?.selection_result);
   const scanResult = asRecord(result?.scan_result);
-  const finalTrades = asList(decision.final_recommendations ?? result?.paper_trades_logged);
-  const watchlist = asList(selection.watchlist_alternatives);
-  const rejected = asList(selection.rejected_candidates).concat(asList(decision.risk_rejected), asList(decision.not_selected));
+  const bestIdeas = asRecord(result?.best_available_ideas);
+  const finalTrades = asList(bestIdeas.paper_eligible).length ? asList(bestIdeas.paper_eligible) : asList(decision.final_recommendations ?? result?.paper_trades_logged);
+  const watchlist = asList(bestIdeas.stock_watchlist).length ? asList(bestIdeas.stock_watchlist) : asList(selection.watchlist_alternatives);
+  const optionResearch = asList(bestIdeas.option_research_only);
+  const blockedInteresting = asList(bestIdeas.blocked_but_interesting).length ? asList(bestIdeas.blocked_but_interesting) : asList(selection.rejected_candidates).concat(asList(decision.risk_rejected), asList(decision.not_selected));
+  const whyNoFinal = Array.isArray(bestIdeas.why_no_final_trades) ? (bestIdeas.why_no_final_trades as string[]) : [];
+  const dataMissing = Array.isArray(bestIdeas.data_missing) ? (bestIdeas.data_missing as string[]) : [];
+  const systemIssues = Array.isArray(bestIdeas.system_issues) ? (bestIdeas.system_issues as string[]) : [];
   const warnings = [
     ...((Array.isArray(result?.warnings) ? result?.warnings : []) as string[]),
     ...((Array.isArray(pickNested(scanResult, "data_quality_summary.warnings")) ? pickNested(scanResult, "data_quality_summary.warnings") : []) as string[])
@@ -90,9 +95,21 @@ export default function ScanPage() {
           <div className="mt-6">
             <WarningBox title="Scan warnings and blocks" items={warnings.concat(finalTrades.length ? [] : ["No final paper trades were selected."])} />
           </div>
+          {result.formatted_best_ideas_summary ? (
+            <section className="mt-6 rounded-3xl bg-white/75 p-5 shadow-card">
+              <h2 className="text-2xl font-black">Best available ideas summary</h2>
+              <div className="mt-3 whitespace-pre-wrap rounded-2xl bg-stone-50 p-4 text-sm leading-7">{String(result.formatted_best_ideas_summary)}</div>
+            </section>
+          ) : null}
           <TradeBucket title="Final paper trades" rows={finalTrades} />
-          <TradeBucket title="Watchlist" rows={watchlist} />
-          <TradeBucket title="Rejected or risk-blocked" rows={rejected} />
+          <TradeBucket title="Best stock watchlist ideas" rows={watchlist} />
+          <TradeBucket title="Option research-only ideas" rows={optionResearch} />
+          <TradeBucket title="Blocked but interesting" rows={blockedInteresting} />
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <WarningBox title="Why no final trades" items={whyNoFinal} />
+            <WarningBox title="Data missing" items={dataMissing} />
+            <WarningBox title="System issues" items={systemIssues} />
+          </div>
           <div className="mt-6 grid gap-4 md:grid-cols-2">
             <Card title="Macro / regime" detail={fmt(JSON.stringify(result.macro_risk ?? result.market_regime ?? {}))} />
             <Card title="Scan execution" detail={fmt(JSON.stringify(scanResult.scan_execution_summary ?? {}))} />
@@ -117,7 +134,7 @@ function TradeBucket({ title, rows }: { title: string; rows: Record<string, unkn
             <thead><tr><th>Ticker</th><th>Status</th><th>Entry</th><th>Target</th><th>Stop</th><th>Reason</th></tr></thead>
             <tbody>
               {rows.map((row, index) => (
-                <tr key={`${row.ticker}-${index}`}>
+                <tr key={`${row.idea_key ?? row.ticker}-${index}`}>
                   <td className="font-black">{fmt(row.ticker)}</td>
                   <td><Badge>{fmt(row.recommendation_status ?? row.status ?? row.outcome ?? "paper")}</Badge></td>
                   <td>{fmtPrice(row.entry_price)}</td>

@@ -65,9 +65,21 @@ def validate_market_data_quality(
     warnings.extend(str(item) for item in data.get("data_quality_warnings", []) if item)
 
     age_days = _safe_float(freshness.get("age_days"))
+    freshness_label = str(freshness.get("freshness_label", "")).lower()
+    session_status = freshness.get("market_session") if isinstance(freshness.get("market_session"), dict) else {}
+    usable_freshness_labels = {"fresh", "latest_completed_session", "slightly_stale"}
     is_stale = bool(freshness.get("is_stale"))
-    if age_days is not None and age_days > max_stale_days:
+
+    if session_status.get("is_stale_by_session") is True:
         is_stale = True
+    elif freshness.get("is_stale") is False and freshness_label in usable_freshness_labels:
+        is_stale = False
+    elif age_days is not None and age_days > max_stale_days:
+        is_stale = True
+
+    if freshness_label == "latest_completed_session" and age_days is not None and age_days > max_stale_days:
+        warnings.append("Latest historical bar matches the latest completed market session despite a weekend/holiday gap.")
+    warnings.extend(str(item) for item in freshness.get("warnings", []) if item)
     if is_stale:
         errors.append("Latest historical bar is stale.")
 

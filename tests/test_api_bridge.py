@@ -1,4 +1,6 @@
 import time
+import asyncio
+import threading
 
 import anyio
 
@@ -17,6 +19,43 @@ def test_run_blocking_backend_call_wraps_non_dict_result():
     assert result["ok"] is True
     assert result["data"] == ["AAPL"]
     assert result["source"] == "api_bridge"
+
+
+def test_run_blocking_backend_call_provides_event_loop_in_worker_thread():
+    def needs_event_loop():
+        loop = asyncio.get_event_loop()
+        return {
+            "ok": True,
+            "loop_closed": loop.is_closed(),
+            "thread_name": threading.current_thread().name,
+        }
+
+    result = anyio.run(run_blocking_backend_call, needs_event_loop)
+
+    assert result["ok"] is True
+    assert result["loop_closed"] is False
+    assert result["thread_name"] != "MainThread"
+
+
+def test_run_blocking_backend_call_provides_event_loop_in_nested_worker_thread():
+    def backend_with_nested_thread():
+        nested_result = {}
+
+        def nested_worker():
+            loop = asyncio.get_event_loop()
+            nested_result["loop_closed"] = loop.is_closed()
+            nested_result["thread_name"] = threading.current_thread().name
+
+        thread = threading.Thread(target=nested_worker, name="asyncio_0")
+        thread.start()
+        thread.join(timeout=2)
+        return {"ok": True, **nested_result}
+
+    result = anyio.run(run_blocking_backend_call, backend_with_nested_thread)
+
+    assert result["ok"] is True
+    assert result["loop_closed"] is False
+    assert result["thread_name"] == "asyncio_0"
 
 
 def test_run_blocking_backend_call_catches_exceptions():

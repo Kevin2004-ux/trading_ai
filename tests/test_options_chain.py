@@ -1,6 +1,12 @@
+from datetime import date, timedelta
+
 import config
 from realtime.options_chain import calculate_option_metrics, get_options_chain, normalize_options_chain
 from realtime.options_eval import evaluate_option_chain_for_trade
+
+
+def _future_expiration() -> str:
+    return (date.today() + timedelta(days=35)).isoformat()
 
 
 def _strong_stock_candidate() -> dict:
@@ -28,7 +34,7 @@ def _raw_option_chain() -> list[dict]:
                 "underlying_ticker": "AAPL",
                 "contract_type": "call",
                 "strike_price": 125.0,
-                "expiration_date": "2026-07-03",
+                "expiration_date": _future_expiration(),
             },
             "last_quote": {"bid": 3.8, "ask": 4.0},
             "day": {"close": 3.9, "volume": 450},
@@ -45,7 +51,7 @@ def _raw_option_chain() -> list[dict]:
                 "underlying_ticker": "AAPL",
                 "contract_type": "call",
                 "strike_price": 130.0,
-                "expiration_date": "2026-07-03",
+                "expiration_date": _future_expiration(),
             },
             "last_quote": {"bid": 1.2, "ask": 1.7},
             "day": {"close": 1.45, "volume": 80},
