@@ -2041,16 +2041,19 @@ def review_ticker_opportunity(
     normalized_ticker = _normalize_ticker(ticker)
     market_snapshot = get_market_snapshot(normalized_ticker, lookback_days=180)
     if not market_snapshot.get("ok"):
+        provider_error = market_snapshot.get("error", "Failed to load market snapshot.")
         return {
-            "ok": False,
+            "ok": True,
             "mode": "review_ticker",
             "timestamp": _now_iso(),
             "ticker": normalized_ticker,
-            "status": "rejected",
+            "status": "ranking_unavailable",
             "candidate": None,
             "decision": None,
             "failed_constraints": [],
-            "reasons": [market_snapshot.get("error", "Failed to load market snapshot.")],
+            "reasons": [provider_error],
+            "warnings": [provider_error],
+            "errors": [],
             "statistical_context": None,
             "catalyst_context": None,
             "market_snapshot": market_snapshot,
@@ -2132,6 +2135,8 @@ def review_ticker_opportunity(
         "market_snapshot": market_snapshot,
         "trade_levels": trade_levels,
         "research_brief": research_brief,
+        "warnings": [],
+        "errors": [],
     }
 
 

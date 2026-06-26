@@ -2,6 +2,7 @@ from analytics.market_regime import (
     analyze_market_breadth,
     apply_regime_to_trade_selection,
     determine_market_regime,
+    get_market_regime_snapshot,
 )
 
 
@@ -116,6 +117,47 @@ def test_missing_data_returns_unknown_cleanly():
 
     assert result["ok"] is True
     assert result["regime"] == "unknown"
+
+
+def test_market_regime_falls_back_to_spy_atr_when_vix_unavailable():
+    result = determine_market_regime(
+        spy_snapshot=_snapshot("SPY", current_price=600, sma_20=590, sma_50=580, sma_200=550, atr_percent=3.2),
+        qqq_snapshot=_snapshot("QQQ", current_price=520, sma_20=510, sma_50=500, sma_200=470),
+        iwm_snapshot=_snapshot("IWM", current_price=230, sma_20=225, sma_50=220, sma_200=210),
+        vix_snapshot={
+            "ok": False,
+            "ticker": "VIX",
+            "error": "IBKR VIX stock-contract lookup skipped. VIX is an index, not a SMART-routed stock.",
+        },
+    )
+
+    volatility_context = result["index_context"]["VIX"]
+
+    assert result["ok"] is True
+    assert volatility_context["source"] == "SPY_ATR"
+    assert volatility_context["spy_atr_percent"] == 3.2
+    assert any("VIX unavailable" in warning for warning in result["warnings"])
+
+
+def test_get_market_regime_snapshot_skips_ibkr_vix_stock_lookup(monkeypatch):
+    requested = []
+
+    def fake_snapshot(ticker, lookback_days=180):
+        requested.append(ticker)
+        if ticker == "VIX":
+            raise AssertionError("VIX must not be requested as a normal stock.")
+        return _snapshot(ticker, current_price=600, sma_20=590, sma_50=580, sma_200=550, atr_percent=2.1)
+
+    monkeypatch.setattr("analytics.market_regime.is_ibkr_market_data_provider", lambda: True)
+    monkeypatch.setattr("analytics.market_regime.get_market_snapshot", fake_snapshot)
+
+    result = get_market_regime_snapshot(include_breadth=False)
+
+    assert result["ok"] is True
+    assert "VIX" not in requested
+    assert result["snapshot_status"]["VIX"] == "fallback"
+    assert result["index_context"]["VIX"]["source"] == "SPY_ATR"
+    assert any("VIX unavailable" in warning for warning in result["warnings"])
 
 
 def test_breadth_calculation_works():

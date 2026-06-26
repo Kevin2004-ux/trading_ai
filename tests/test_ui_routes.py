@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import time
 
 import pytest
 
@@ -26,7 +27,7 @@ def _force_deterministic_ai_planner(monkeypatch):
 
 
 def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_options: bool = False):
-    def fake_execute_scan_plan(proposed_plan, runtime_context=None, db_path="strategy_library.db"):
+    def fake_execute_scan_plan(proposed_plan, runtime_context=None, db_path="strategy_library.db", internal_controls=None):
         plan_payload = proposed_plan.model_dump(mode="json") if hasattr(proposed_plan, "model_dump") else dict(proposed_plan or {})
         requested = plan_payload.get("requested_instrument", "stocks")
         resolved_include_options = include_options or requested == "options" or bool(plan_payload.get("include_options"))
@@ -37,6 +38,7 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
                 "db_path": db_path,
                 "include_options": resolved_include_options,
                 "prefer_options": bool(plan_payload.get("prefer_options")),
+                "internal_controls": dict(internal_controls or {}),
             }
         )
         option_rows = [
@@ -150,8 +152,8 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
 def _fake_adaptive_execution(captured: dict, ticker: str = "AAPL", include_options: bool = False):
     single_scan = _fake_planned_execution(captured, ticker=ticker, include_options=include_options)
 
-    def fake_execute_adaptive_scan_plan(proposed_plan, runtime_context=None, db_path="strategy_library.db", message=None, provider=None):
-        base = single_scan(proposed_plan, runtime_context=runtime_context, db_path=db_path)
+    def fake_execute_adaptive_scan_plan(proposed_plan, runtime_context=None, db_path="strategy_library.db", message=None, provider=None, internal_controls=None):
+        base = single_scan(proposed_plan, runtime_context=runtime_context, db_path=db_path, internal_controls=internal_controls)
         assistant = dict(base["assistant_response"])
         assistant["refinement"] = {
             "used": False,
@@ -799,6 +801,66 @@ def test_review_ticker_route_returns_structured_review(monkeypatch):
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_review_ticker_route_returns_when_vix_context_warns(monkeypatch):
+    monkeypatch.setattr(
+        "ui.app.review_ticker_opportunity",
+        lambda **kwargs: {
+            "ok": True,
+            "mode": "review_ticker",
+            "timestamp": "2026-06-05T00:00:00+00:00",
+            "ticker": kwargs["ticker"],
+            "status": "watchlist",
+            "decision": {"ticker": kwargs["ticker"], "decision": "watchlist"},
+            "reasons": ["VIX unavailable; using SPY ATR volatility context."],
+            "research_brief": {
+                "market_regime": {
+                    "ok": True,
+                    "index_context": {"VIX": {"source": "SPY_ATR"}},
+                    "warnings": ["VIX unavailable; using SPY ATR volatility context."],
+                }
+            },
+        },
+    )
+
+    response = client.get("/brain/review-ticker/AAPL")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["ticker"] == "AAPL"
+    assert "VIX unavailable" in payload["reasons"][0]
+    assert payload["research_brief"]["market_regime"]["index_context"]["VIX"]["source"] == "SPY_ATR"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_review_ticker_route_returns_ranking_unavailable_provider_warning(monkeypatch):
+    provider_error = "IBKR client ID is already in use. Close stale TWS sessions or use a unique IBKR_CLIENT_ID."
+    monkeypatch.setattr(
+        "ui.app.review_ticker_opportunity",
+        lambda **kwargs: {
+            "ok": True,
+            "mode": "review_ticker",
+            "timestamp": "2026-06-05T00:00:00+00:00",
+            "ticker": kwargs["ticker"],
+            "status": "ranking_unavailable",
+            "candidate": None,
+            "decision": None,
+            "reasons": [provider_error],
+            "warnings": [provider_error],
+            "market_snapshot": {"ok": False, "error": provider_error, "error_type": "provider"},
+        },
+    )
+
+    response = client.get("/brain/review-ticker/AAPL")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["status"] == "ranking_unavailable"
+    assert payload["warnings"] == [provider_error]
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
 def test_monitor_open_trades_route_returns_structured_result(monkeypatch):
     monkeypatch.setattr(
         "ui.app.monitor_open_trades",
@@ -1043,6 +1105,68 @@ def test_api_chat_route_returns_structured_assistant_response(monkeypatch):
     assert payload["validation"]["deterministic_engine_source_of_truth"] is True
     assert payload["planner"]["intent"]["objective"] == "ticker_review"
     assert captured["proposed_plan"]["custom_tickers"] == ["AAPL"]
+    assert captured["internal_controls"]["scan_total_timeout_seconds"] <= 45.0
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_review_timeout_returns_ranking_unavailable(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("CHAT_SCAN_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+
+    def hanging_execute_scan_plan(proposed_plan, runtime_context=None, db_path="strategy_library.db", internal_controls=None):
+        captured["proposed_plan"] = dict(proposed_plan or {})
+        captured["internal_controls"] = dict(internal_controls or {})
+        time.sleep(0.2)
+        return {"ok": True, "best_available_ideas": {"paper_eligible": [{"ticker": "AAPL"}]}}
+
+    monkeypatch.setattr("ui.app.execute_scan_plan", hanging_execute_scan_plan)
+
+    response = client.post("/api/chat", json={"message": "Review AAPL"})
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["mode"] == "deterministic_timeout"
+    assert payload["ranking_status"] == "ranking_unavailable"
+    assert payload["assistant_response"]["status"] == "ranking_unavailable"
+    assert payload["assistant_response"]["top_stocks"] == []
+    assert payload["assistant_response"]["top_options"] == []
+    assert payload["assistant_response"]["ticker_cards"] == []
+    assert payload["best_available_ideas"]["paper_eligible"] == []
+    assert payload["best_available_ideas"]["stock_watchlist"] == []
+    assert payload["best_available_ideas"]["blocked_but_interesting"] == []
+    assert "Market data provider timed out" in payload["answer"]
+    assert any("IBKR/TWS" in warning for warning in payload["warnings"])
+    assert payload["validation"]["paper_trade_logged"] is False
+    assert payload["brokerage_execution_enabled"] is False
+    assert captured["internal_controls"]["scan_total_timeout_seconds"] <= 0.01
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_broad_scan_timeout_returns_ranking_unavailable(monkeypatch):
+    monkeypatch.setenv("CHAT_SCAN_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+
+    def hanging_adaptive_scan(*args, **kwargs):
+        time.sleep(0.2)
+        return {"ok": True, "best_available_ideas": {"stock_watchlist": [{"ticker": "AAPL"}]}}
+
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", hanging_adaptive_scan)
+
+    response = client.post("/api/chat", json={"message": "Give me your best stocks right now. Do stock only."})
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["ranking_status"] == "ranking_unavailable"
+    assert payload["assistant_response"]["top_stocks"] == []
+    assert payload["assistant_response"]["ticker_cards"] == []
+    assert payload["best_available_ideas"]["stock_watchlist"] == []
+    assert "Market ranking is unavailable" in payload["answer"]
+    assert "AAPL" not in payload["answer"]
+    assert payload["raw_result"]["include_options"] is False
+    assert payload["scan_result"]["status"] == "timeout"
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")

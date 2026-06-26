@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from realtime.market_data import get_market_snapshot
+from providers.market_data_provider import is_ibkr_market_data_provider
 from scanner.universe_builder import get_default_universe
 
 
@@ -48,6 +49,53 @@ def _current_price(snapshot: dict | None) -> float | None:
             if isinstance(quote, dict):
                 return _safe_float(quote.get("last_price"))
     return None
+
+
+def _dedupe(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        item = str(value or "").strip()
+        key = item.lower()
+        if not item or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _snapshot_warning(snapshot: dict | None, label: str) -> str | None:
+    if not isinstance(snapshot, dict) or snapshot.get("ok"):
+        return None
+    error = snapshot.get("error")
+    if not error:
+        return None
+    return f"{label} market-regime snapshot unavailable: {error}"
+
+
+def _vix_unavailable_snapshot(error: str) -> dict:
+    return {
+        "ok": False,
+        "ticker": "VIX",
+        "source": "unavailable",
+        "timestamp": _now_iso(),
+        "data": {
+            "volatility_fallback": "SPY_ATR",
+        },
+        "error": error,
+        "warning": "VIX unavailable; using SPY ATR volatility context when available.",
+    }
+
+
+def _get_optional_vix_snapshot() -> dict:
+    if is_ibkr_market_data_provider():
+        return _vix_unavailable_snapshot(
+            "IBKR VIX stock-contract lookup skipped. VIX is an index, not a SMART-routed stock."
+        )
+    try:
+        return get_market_snapshot("I:VIX", lookback_days=120)
+    except Exception as exc:
+        return _vix_unavailable_snapshot(f"VIX snapshot request failed: {exc}")
 
 
 def analyze_index_trend(
@@ -137,6 +185,7 @@ def analyze_volatility_regime(
             "vix_value": vix_value,
             "spy_atr_percent": _safe_float(_snapshot_technical(spy_snapshot).get("atr_percent")),
             "error": None,
+            "warnings": [],
         }
 
     spy_atr_percent = _safe_float(_snapshot_technical(spy_snapshot).get("atr_percent"))
@@ -148,6 +197,7 @@ def analyze_volatility_regime(
             "vix_value": None,
             "spy_atr_percent": None,
             "error": "VIX and SPY ATR context are unavailable.",
+            "warnings": [_snapshot_warning(vix_snapshot, "VIX")] if _snapshot_warning(vix_snapshot, "VIX") else [],
         }
 
     if spy_atr_percent < 1.5:
@@ -166,6 +216,12 @@ def analyze_volatility_regime(
         "vix_value": None,
         "spy_atr_percent": spy_atr_percent,
         "error": None,
+        "warnings": _dedupe(
+            [
+                "VIX unavailable; using SPY ATR volatility context.",
+                _snapshot_warning(vix_snapshot, "VIX"),
+            ]
+        ),
     }
 
 
@@ -261,6 +317,14 @@ def determine_market_regime(
     iwm_context = analyze_index_trend("IWM", iwm_snapshot or {})
     vix_context = analyze_volatility_regime(vix_snapshot=vix_snapshot, spy_snapshot=spy_snapshot)
     breadth_context = analyze_market_breadth(universe_snapshots=universe_snapshots)
+    input_warnings = _dedupe(
+        [
+            _snapshot_warning(spy_snapshot, "SPY"),
+            _snapshot_warning(qqq_snapshot, "QQQ"),
+            _snapshot_warning(iwm_snapshot, "IWM"),
+            *list(vix_context.get("warnings", []) if isinstance(vix_context.get("warnings"), list) else []),
+        ]
+    )
 
     index_context = {
         "SPY": spy_context,
@@ -290,7 +354,7 @@ def determine_market_regime(
             "index_context": index_context,
             "breadth_context": breadth_context,
             "risk_flags": ["Insufficient market data for regime analysis."],
-            "warnings": ["Insufficient market data for regime analysis."],
+            "warnings": _dedupe(["Insufficient market data for regime analysis.", *input_warnings]),
             "reasons": ["Index and volatility context are unavailable."],
             "data_quality": {"quality_label": "poor"},
             "summary": "Market regime is unknown because index and volatility context are unavailable.",
@@ -476,7 +540,7 @@ def determine_market_regime(
         "index_context": index_context,
         "breadth_context": breadth_context,
         "risk_flags": risk_flags,
-        "warnings": risk_flags,
+        "warnings": _dedupe([*risk_flags, *input_warnings]),
         "reasons": [
             f"bullish_indexes={bullish_count}",
             f"bearish_indexes={bearish_count}",
@@ -497,7 +561,7 @@ def get_market_regime_snapshot(
     spy_snapshot = get_market_snapshot("SPY", lookback_days=250)
     qqq_snapshot = get_market_snapshot("QQQ", lookback_days=250)
     iwm_snapshot = get_market_snapshot("IWM", lookback_days=250)
-    vix_snapshot = get_market_snapshot("VIX", lookback_days=120)
+    vix_snapshot = _get_optional_vix_snapshot()
 
     breadth_snapshots: list[dict] | None = None
     if include_breadth:
@@ -513,11 +577,17 @@ def get_market_regime_snapshot(
         spy_snapshot=spy_snapshot if spy_snapshot.get("ok") else None,
         qqq_snapshot=qqq_snapshot if qqq_snapshot.get("ok") else None,
         iwm_snapshot=iwm_snapshot if iwm_snapshot.get("ok") else None,
-        vix_snapshot=vix_snapshot if vix_snapshot.get("ok") else None,
+        vix_snapshot=vix_snapshot,
         universe_snapshots=breadth_snapshots,
     )
     regime_result["include_breadth"] = include_breadth
     regime_result["snapshots_requested"] = ["SPY", "QQQ", "IWM", "VIX"]
+    regime_result["snapshot_status"] = {
+        "SPY": "available" if spy_snapshot.get("ok") else "unavailable",
+        "QQQ": "available" if qqq_snapshot.get("ok") else "unavailable",
+        "IWM": "available" if iwm_snapshot.get("ok") else "unavailable",
+        "VIX": "available" if vix_snapshot.get("ok") else "fallback",
+    }
     return regime_result
 
 

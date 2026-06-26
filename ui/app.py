@@ -69,6 +69,9 @@ from tracking.trade_logger import (  # noqa: E402
 from translator.main import ask_translator, get_model_init_error  # noqa: E402
 from ui.api_bridge import run_blocking_backend_call  # noqa: E402
 
+DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS = 45.0
+CHAT_SCAN_TIMEOUT_WARNING = "Market data provider timed out. IBKR/TWS may be unavailable or blocked by a stale API session."
+
 
 def _load_optional_prediction_dossier() -> tuple[Callable | None, str | None]:
     try:
@@ -531,6 +534,31 @@ def _requested_instrument_from_options(include_options: bool) -> str:
     return "both" if include_options else "stocks"
 
 
+def _safe_timeout_env(name: str, default: float, minimum: float = 0.01, maximum: float = 300.0) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _chat_scan_timeout_seconds() -> float:
+    return _safe_timeout_env("CHAT_SCAN_TIMEOUT_SECONDS", DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS)
+
+
+def _planning_execution_timeout_seconds() -> float:
+    return _safe_timeout_env("PLANNING_EXECUTION_TIMEOUT_SECONDS", max(DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS, 60.0))
+
+
+def _chat_scan_internal_controls(timeout_seconds: float) -> dict:
+    scan_total_timeout = max(0.01, timeout_seconds * 0.85)
+    ticker_timeout = max(0.01, min(10.0, scan_total_timeout / 3.0))
+    return {
+        "scan_total_timeout_seconds": scan_total_timeout,
+        "scan_ticker_timeout_seconds": ticker_timeout,
+    }
+
+
 def _safe_max_passes(plan: dict) -> int:
     try:
         return int((plan.get("refinement") or {}).get("max_passes") or 1)
@@ -618,7 +646,131 @@ def _run_paper_cycle_payload(request: PaperCycleRequest) -> dict:
     )
 
 
-def _run_best_ideas_chat_scan(message: str, db_path: str) -> dict:
+def _timeout_issue_list(extra: str | None = None) -> list[str]:
+    issues = [CHAT_SCAN_TIMEOUT_WARNING]
+    if extra:
+        issues.append(str(extra))
+    return list(dict.fromkeys(item for item in issues if item))
+
+
+def _chat_scan_timeout_payload(message: str, timeout_seconds: float, bridge_result: dict | None = None) -> dict:
+    init_error = get_model_init_error()
+    bridge_error = bridge_result.get("error") if isinstance(bridge_result, dict) else None
+    system_issues = _timeout_issue_list(bridge_error)
+    data_missing = ["Usable market data was not returned before the chat scan timeout."]
+    why_no_final_trades = ["The deterministic scan timed out before provider data could be validated."]
+    next_steps = [
+        "Check that TWS/IBKR is open, read-only API access is enabled, and no stale API session is holding the client ID.",
+        "Rerun the request after the market-data provider responds cleanly.",
+    ]
+    best_ideas = {
+        "ok": True,
+        "paper_trading_only": True,
+        "summary": CHAT_SCAN_TIMEOUT_WARNING,
+        "ranking_status": "unavailable",
+        "paper_eligible": [],
+        "stock_watchlist": [],
+        "option_research_only": [],
+        "option_underlying_watchlist": [],
+        "blocked_but_interesting": [],
+        "why_no_final_trades": why_no_final_trades,
+        "data_missing": data_missing,
+        "system_issues": system_issues,
+        "next_steps": next_steps,
+        "warnings": system_issues,
+    }
+    assistant_response = {
+        "ok": True,
+        "response_type": "trade_ideas",
+        "status": "ranking_unavailable",
+        "ranking_status": "unavailable",
+        "paper_trading_only": True,
+        "brokerage_execution_enabled": False,
+        "paper_eligible": [],
+        "top_stocks": [],
+        "top_options": [],
+        "option_underlying_watchlist": [],
+        "blocked": [],
+        "ticker_cards": [],
+        "why_no_final_trades": why_no_final_trades,
+        "data_missing": data_missing,
+        "system_issues": system_issues,
+        "next_steps": next_steps,
+        "market_state": {
+            "provider_status": "unavailable",
+            "ranking_status": "unavailable",
+            "timeout_seconds": timeout_seconds,
+        },
+        "scan_summary": {
+            "status": "timeout",
+            "ranking_status": "unavailable",
+            "selected_count": 0,
+            "logged_count": 0,
+            "auto_log": False,
+            "timeout_seconds": timeout_seconds,
+        },
+        "warnings": system_issues,
+        "errors": [],
+    }
+    answer = format_best_ideas_response(assistant_response)
+    scan_result = {
+        "ok": False,
+        "status": "timeout",
+        "ranking_status": "unavailable",
+        "paper_trading_only": True,
+        "brokerage_execution_enabled": False,
+        "error": CHAT_SCAN_TIMEOUT_WARNING,
+        "warnings": system_issues,
+        "errors": [],
+    }
+    return {
+        "ok": True,
+        "mode": "deterministic_timeout",
+        "ranking_status": "ranking_unavailable",
+        "answer": answer,
+        "gemini_available": init_error is None,
+        "paper_trading_only": True,
+        "brokerage_execution_enabled": False,
+        "best_available_ideas": best_ideas,
+        "assistant_response": assistant_response,
+        "scan_result": scan_result,
+        "trading_result": {},
+        "formatted_best_ideas_summary": answer,
+        "planner": {},
+        "planner_provider": None,
+        "planner_status": "timeout",
+        "planner_fallback_used": init_error is not None,
+        "policy_validation": {},
+        "approved_plan": {},
+        "execution_summary": scan_result,
+        "adaptive_execution": None,
+        "refinement_used": False,
+        "passes_executed": 0,
+        "refinement_stop_reason": "Chat scan timeout.",
+        "validation": {
+            "validation_status": "ranking_unavailable",
+            "safe_to_show_user": True,
+            "deterministic_engine_source_of_truth": True,
+            "deterministic_fallback_used": init_error is not None,
+            "timeout": True,
+            "paper_trade_logged": False,
+        },
+        "raw_result": {
+            "message": message,
+            "timeout_seconds": timeout_seconds,
+            "gemini_status": "available" if init_error is None else "unavailable",
+            "include_options": _wants_options_request(message) and not _is_stock_only_request(message),
+        },
+        "warnings": system_issues,
+        "errors": [],
+    }
+
+
+def _is_backend_timeout(result: dict) -> bool:
+    return isinstance(result, dict) and result.get("source") == "api_bridge" and result.get("error_type") == "TimeoutError"
+
+
+def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float | None = None) -> dict:
     user_preferences = {
         "requested_instrument": _requested_instrument_from_message(message),
         "include_options": _wants_options_request(message),
@@ -639,10 +791,11 @@ def _run_best_ideas_chat_scan(message: str, db_path: str) -> dict:
     approved_plan = planner_result.get("approved_plan", {}) if isinstance(planner_result, dict) else {}
     execution_plan = _prepare_chat_execution_plan(message, approved_plan)
     use_adaptive = _should_use_adaptive_chat_execution(execution_plan)
+    internal_controls = _chat_scan_internal_controls(timeout_seconds or _chat_scan_timeout_seconds())
     execution_result = (
-        execute_adaptive_scan_plan(execution_plan, runtime_context={}, db_path=db_path, message=message)
+        execute_adaptive_scan_plan(execution_plan, runtime_context={}, db_path=db_path, message=message, internal_controls=internal_controls)
         if use_adaptive
-        else execute_scan_plan(execution_plan, runtime_context={}, db_path=db_path)
+        else execute_scan_plan(execution_plan, runtime_context={}, db_path=db_path, internal_controls=internal_controls)
     )
     best_ideas = execution_result.get("best_available_ideas") if isinstance(execution_result, dict) else {}
     assistant_response = execution_result.get("assistant_response") if isinstance(execution_result, dict) else {}
@@ -750,7 +903,8 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
             "errors": [],
         }
     if _is_trade_question(message):
-        best_ideas_payload = _run_best_ideas_chat_scan(message, db_path=db_path)
+        chat_timeout = _chat_scan_timeout_seconds()
+        best_ideas_payload = _run_best_ideas_chat_scan(message, db_path=db_path, timeout_seconds=chat_timeout)
         planner_result = best_ideas_payload.get("planner", {})
         best_ideas = best_ideas_payload["best_available_ideas"]
         assistant_response = best_ideas_payload["assistant_response"]
@@ -1123,6 +1277,7 @@ async def api_planning_execute(request: PlanningExecuteRequest):
         request.plan,
         runtime_context=request.runtime_context,
         db_path=request.db_path,
+        timeout_seconds=_planning_execution_timeout_seconds(),
     )
 
 
@@ -1135,6 +1290,7 @@ async def api_planning_execute_adaptive(request: PlanningExecuteAdaptiveRequest)
         db_path=request.db_path,
         message=request.message,
         provider=request.provider,
+        timeout_seconds=_planning_execution_timeout_seconds(),
     )
 
 
@@ -1243,13 +1399,20 @@ async def ask(request: AskRequest):
     The main endpoint for the chat interface. It takes a natural language
     question and returns a synthesized answer from the Translator AI.
     """
-    result = await run_blocking_backend_call(_chat_payload, request.question)
+    timeout_seconds = _chat_scan_timeout_seconds() if _is_trade_question(request.question) else None
+    result = await run_blocking_backend_call(_chat_payload, request.question, timeout_seconds=timeout_seconds)
+    if _is_backend_timeout(result):
+        result = _chat_scan_timeout_payload(request.question, timeout_seconds or _chat_scan_timeout_seconds(), result)
     return {"answer": result.get("answer"), **result}
 
 
 @app.post("/api/chat")
 async def api_chat(request: ChatRequest):
-    return await run_blocking_backend_call(_chat_payload, request.message, db_path=request.db_path)
+    timeout_seconds = _chat_scan_timeout_seconds() if _is_trade_question(request.message) else None
+    result = await run_blocking_backend_call(_chat_payload, request.message, db_path=request.db_path, timeout_seconds=timeout_seconds)
+    if _is_backend_timeout(result):
+        return _chat_scan_timeout_payload(request.message, timeout_seconds or _chat_scan_timeout_seconds(), result)
+    return result
 
 
 @app.post("/api/scan")

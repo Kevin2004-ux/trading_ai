@@ -26,6 +26,20 @@ def _as_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _control_float(controls: dict, key: str, default: float) -> float:
+    try:
+        return float(controls.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _control_int(controls: dict, key: str, default: int) -> int:
+    try:
+        return int(controls.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _empty_execution_summary() -> dict:
     return {
         "status": "failed",
@@ -409,6 +423,9 @@ def execute_scan_plan(
         auto_log=False,
         db_path=db_path,
         tickers=universe_result.get("tickers", []),
+        scan_max_concurrency=_control_int(controls, "scan_max_concurrency", 5),
+        scan_ticker_timeout_seconds=_control_float(controls, "scan_ticker_timeout_seconds", 15.0),
+        scan_total_timeout_seconds=_control_float(controls, "scan_total_timeout_seconds", 180.0),
         universe_result_override={
             "ok": True,
             "universe": "scan_plan_combined",

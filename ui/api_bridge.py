@@ -67,7 +67,7 @@ def _run_with_thread_event_loop(func: Callable[..., Any], *args: Any, **kwargs: 
 async def run_blocking_backend_call(
     func: Callable[..., Any],
     *args: Any,
-    timeout_seconds: int | None = None,
+    timeout_seconds: float | None = None,
     **kwargs: Any,
 ) -> dict:
     """Run synchronous backend work outside FastAPI's event loop.

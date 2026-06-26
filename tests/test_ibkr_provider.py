@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from contextlib import contextmanager
+import threading
+import time
 
 from providers import ibkr_provider
 
@@ -181,6 +183,120 @@ def test_mocked_ibkr_quote_normalizes_to_existing_schema(monkeypatch):
     assert result["source"] == "ibkr"
     assert result["data"]["last_price"] == 101.5
     assert result["data"]["previous_close"] == 100.0
+
+
+def test_ibkr_vix_is_not_requested_as_stock(monkeypatch):
+    def fail_import(name):
+        raise AssertionError(f"IBKR should not be imported for VIX stock-contract lookup: {name}")
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", fail_import)
+
+    historical = ibkr_provider.get_ibkr_historical_bars("VIX", lookback_days=5)
+    quote = ibkr_provider.get_ibkr_live_quote("VIX")
+
+    assert historical["ok"] is False
+    assert quote["ok"] is False
+    assert historical["error_type"] == "symbol"
+    assert quote["error_type"] == "symbol"
+    assert "index" in historical["error"].lower()
+    assert "stock" in historical["error"].lower()
+
+
+def test_ibkr_unknown_contract_error_returns_symbol_warning(monkeypatch):
+    class UnknownContractIB(FakeIB):
+        def __init__(self):
+            super().__init__()
+
+        def qualifyContracts(self, contract):
+            raise RuntimeError("No security definition has been found for the request: Unknown contract")
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(UnknownContractIB))
+
+    result = ibkr_provider.get_ibkr_live_quote("BAD")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "symbol"
+    assert "contract qualification failed" in result["error"]
+    assert "Unknown contract" in result["error"]
+
+
+def test_ibkr_error_326_normalizes_to_client_id_message(monkeypatch):
+    class ClientIdInUseIB(FakeIB):
+        def __init__(self):
+            super().__init__()
+
+        def connect(self, host, port, clientId, readonly=True, timeout=8):
+            raise TimeoutError("Error 326, reqId -1: Unable to connect as the client id is already in use. clientId already in use?")
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(ClientIdInUseIB))
+
+    result = ibkr_provider.get_ibkr_live_quote("AAPL")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "provider"
+    assert result["error"] == "IBKR client ID is already in use. Close stale TWS sessions or use a unique IBKR_CLIENT_ID."
+
+
+def test_concurrent_ibkr_quote_requests_are_serialized(monkeypatch):
+    class SerializedIB(FakeIB):
+        active_connects = 0
+        max_active_connects = 0
+        connect_client_ids = []
+        class_lock = threading.Lock()
+
+        def __init__(self):
+            super().__init__()
+
+        def connect(self, host, port, clientId, readonly=True, timeout=8):
+            with self.class_lock:
+                SerializedIB.active_connects += 1
+                SerializedIB.max_active_connects = max(SerializedIB.max_active_connects, SerializedIB.active_connects)
+                SerializedIB.connect_client_ids.append(clientId)
+            time.sleep(0.03)
+            self.connected = True
+
+        def sleep(self, seconds):
+            time.sleep(0.03)
+
+        def disconnect(self):
+            with self.class_lock:
+                SerializedIB.active_connects -= 1
+            self.connected = False
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(SerializedIB))
+    monkeypatch.setenv("IBKR_CLIENT_ID", "701")
+
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(ibkr_provider.get_ibkr_live_quote("AAPL"))),
+        threading.Thread(target=lambda: results.append(ibkr_provider.get_ibkr_live_quote("MSFT"))),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert len(results) == 2
+    assert all(result["ok"] for result in results)
+    assert SerializedIB.connect_client_ids == [701, 701]
+    assert SerializedIB.max_active_connects == 1
+
+
+def test_market_snapshot_returns_quick_provider_failure_when_client_id_in_use(monkeypatch):
+    class ClientIdInUseIB(FakeIB):
+        def __init__(self):
+            super().__init__()
+
+        def connect(self, host, port, clientId, readonly=True, timeout=8):
+            raise RuntimeError("Peer closed connection. clientId 701 already in use? Error 326")
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(ClientIdInUseIB))
+
+    result = ibkr_provider.get_ibkr_market_snapshot("AAPL", lookback_days=2)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "provider"
+    assert "IBKR client ID is already in use" in result["error"]
 
 
 def test_ibkr_options_returns_small_quoted_chain_when_snapshots_work(monkeypatch):

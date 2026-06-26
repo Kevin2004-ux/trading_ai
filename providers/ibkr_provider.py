@@ -18,6 +18,24 @@ from quality.data_quality import validate_market_data_quality
 
 SOURCE_NAME = "ibkr"
 UNAVAILABLE_SOURCE = "unavailable"
+IBKR_NON_STOCK_SYMBOLS = {
+    "VIX": "VIX is an index, not a SMART-routed stock.",
+    "^VIX": "VIX is an index, not a SMART-routed stock.",
+    "VIXCLS": "VIXCLS is an economic-data symbol, not a SMART-routed stock.",
+}
+UNKNOWN_CONTRACT_PATTERNS = (
+    "no security definition",
+    "unknown contract",
+    "ambiguous contract",
+    "contract description specified is ambiguous",
+)
+CLIENT_ID_IN_USE_PATTERNS = (
+    "error 326",
+    "client id is already in use",
+    "clientid already in use",
+)
+CLIENT_ID_IN_USE_MESSAGE = "IBKR client ID is already in use. Close stale TWS sessions or use a unique IBKR_CLIENT_ID."
+_IBKR_CONNECTION_LOCK = threading.Lock()
 
 
 def _now_iso() -> str:
@@ -53,6 +71,45 @@ def _error_response(
         response["error_type"] = error_type
         response["provider"] = SOURCE_NAME
     return response
+
+
+def _is_unknown_contract_error(error: Any) -> bool:
+    message = str(error or "").lower()
+    return any(pattern in message for pattern in UNKNOWN_CONTRACT_PATTERNS)
+
+
+def _non_stock_symbol_error(ticker: str) -> dict | None:
+    normalized = str(ticker or "").strip().upper()
+    reason = IBKR_NON_STOCK_SYMBOLS.get(normalized)
+    if not reason:
+        return None
+    return _error_response(
+        normalized,
+        (
+            f"IBKR stock contract request blocked: {reason} "
+            "Use an index-specific provider path or a non-blocking market-regime fallback."
+        ),
+        error_type="symbol",
+    )
+
+
+def _qualify_contracts(ib: Any, contract: Any, ticker: str, contract_kind: str) -> tuple[list[Any], dict | None]:
+    try:
+        qualified = ib.qualifyContracts(contract)
+    except Exception as exc:
+        error_type = "symbol" if _is_unknown_contract_error(exc) else "provider"
+        return [], _error_response(
+            ticker,
+            f"IBKR {contract_kind} contract qualification failed for {ticker}: {exc}",
+            error_type=error_type,
+        )
+    if not qualified:
+        return [], _error_response(
+            ticker,
+            f"IBKR could not qualify {contract_kind} contract for {ticker}.",
+            error_type="symbol",
+        )
+    return list(qualified), None
 
 
 def _setting(name: str, default: Any = None) -> Any:
@@ -122,6 +179,54 @@ class _IbkrTimeoutError(TimeoutError):
     pass
 
 
+class _IbkrProviderError(RuntimeError):
+    def __init__(self, message: str, error_type: str = "provider"):
+        super().__init__(message)
+        self.error_type = error_type
+
+
+def _is_client_id_in_use_error(error: Any) -> bool:
+    message = str(error or "").lower()
+    return (
+        ("326" in message and "client" in message)
+        or any(pattern in message for pattern in CLIENT_ID_IN_USE_PATTERNS)
+        or ("already in use" in message and ("client id" in message or "clientid" in message))
+    )
+
+
+def _normalized_provider_error(error: Any, operation: str = "request") -> tuple[str, str]:
+    if isinstance(error, _IbkrProviderError):
+        return str(error), error.error_type
+    if _is_client_id_in_use_error(error):
+        return CLIENT_ID_IN_USE_MESSAGE, "provider"
+    if _is_unknown_contract_error(error):
+        return f"IBKR {operation} contract unavailable: {error}", "symbol"
+    if operation == "connection":
+        return f"IBKR connection failed: {error}", "provider"
+    return f"IBKR {operation} unavailable: {error}", "provider"
+
+
+def _provider_error_response(ticker: str, error: Any, operation: str) -> dict:
+    message, error_type = _normalized_provider_error(error, operation=operation)
+    return _error_response(ticker, message, error_type=error_type)
+
+
+def _connect_timeout_seconds(cfg: dict) -> float:
+    try:
+        configured = float(cfg.get("timeout_seconds") or 4)
+    except (TypeError, ValueError):
+        configured = 4.0
+    return max(1.0, min(configured, 4.0))
+
+
+def _lock_timeout_seconds(cfg: dict) -> float:
+    try:
+        configured = float(cfg.get("timeout_seconds") or 4)
+    except (TypeError, ValueError):
+        configured = 4.0
+    return max(1.0, min(configured / 2.0, 3.0))
+
+
 @contextmanager
 def _ticker_timeout(seconds: int | float | None, ticker: str, operation: str):
     if not seconds or seconds <= 0:
@@ -151,20 +256,31 @@ def _ticker_timeout(seconds: int | float | None, ticker: str, operation: str):
 
 @contextmanager
 def _ibkr_connection() -> Iterator[tuple[Any, Any, dict]]:
+    cfg = get_ibkr_config()
     ib_module, import_error = _load_ib_insync()
     if import_error:
-        raise RuntimeError(import_error)
+        raise _IbkrProviderError(import_error, "dependency")
 
-    cfg = get_ibkr_config()
+    lock_acquired = _IBKR_CONNECTION_LOCK.acquire(timeout=_lock_timeout_seconds(cfg))
+    if not lock_acquired:
+        raise _IbkrProviderError(
+            "IBKR connection is busy. Market-data requests are serialized to avoid reusing the same IBKR_CLIENT_ID concurrently.",
+            "provider_busy",
+        )
+
     ib = ib_module.IB()
     try:
-        ib.connect(
-            cfg["host"],
-            cfg["port"],
-            clientId=cfg["client_id"],
-            readonly=True,
-            timeout=8,
-        )
+        try:
+            ib.connect(
+                cfg["host"],
+                cfg["port"],
+                clientId=cfg["client_id"],
+                readonly=True,
+                timeout=_connect_timeout_seconds(cfg),
+            )
+        except Exception as exc:
+            message, error_type = _normalized_provider_error(exc, operation="connection")
+            raise _IbkrProviderError(message, error_type) from exc
         try:
             ib.RequestTimeout = cfg["timeout_seconds"]
         except Exception:
@@ -182,6 +298,7 @@ def _ibkr_connection() -> Iterator[tuple[Any, Any, dict]]:
                 ib.disconnect()
         except Exception:
             pass
+        _IBKR_CONNECTION_LOCK.release()
 
 
 def check_ibkr_connection() -> dict:
@@ -201,12 +318,9 @@ def check_ibkr_connection() -> dict:
             "error": import_error,
         }
 
-    ib = ib_module.IB()
     try:
-        ib.connect(cfg["host"], cfg["port"], clientId=cfg["client_id"], readonly=True, timeout=8)
-        if cfg["use_delayed_data"]:
-            ib.reqMarketDataType(3)
-        connected = bool(ib.isConnected())
+        with _ibkr_connection() as (ib, _ib_module, cfg):
+            connected = bool(ib.isConnected())
         return {
             "ok": connected,
             "source": SOURCE_NAME if connected else UNAVAILABLE_SOURCE,
@@ -219,7 +333,7 @@ def check_ibkr_connection() -> dict:
             "client_id": cfg["client_id"],
             "error": None if connected else "IBKR connection could not be established.",
         }
-    except Exception as exc:
+    except _IbkrProviderError as exc:
         return {
             "ok": False,
             "source": UNAVAILABLE_SOURCE,
@@ -230,14 +344,24 @@ def check_ibkr_connection() -> dict:
             "host": cfg["host"],
             "port": cfg["port"],
             "client_id": cfg["client_id"],
-            "error": f"IBKR connection failed: {exc}",
+            "error": str(exc),
+            "error_type": exc.error_type,
         }
-    finally:
-        try:
-            if ib.isConnected():
-                ib.disconnect()
-        except Exception:
-            pass
+    except Exception as exc:
+        message, error_type = _normalized_provider_error(exc, operation="connection")
+        return {
+            "ok": False,
+            "source": UNAVAILABLE_SOURCE,
+            "timestamp": _now_iso(),
+            "connected": False,
+            "read_only": True,
+            "use_delayed_data": cfg["use_delayed_data"],
+            "host": cfg["host"],
+            "port": cfg["port"],
+            "client_id": cfg["client_id"],
+            "error": message,
+            "error_type": error_type,
+        }
 
 
 def _stock_contract(ib_module: Any, ticker: str):
@@ -459,6 +583,9 @@ def _latest_bar_quote_fallback(historical_result: dict) -> dict | None:
 
 def get_ibkr_historical_bars(ticker: str, lookback_days: int = 180) -> dict:
     original_ticker = str(ticker or "").strip().upper()
+    blocked = _non_stock_symbol_error(original_ticker)
+    if blocked:
+        return blocked
     normalized_result = _normalize_for_ibkr(original_ticker)
     if not normalized_result.get("ok"):
         return _error_response(original_ticker, normalized_result.get("error", "Ticker normalization failed."), error_type="symbol")
@@ -467,9 +594,9 @@ def get_ibkr_historical_bars(ticker: str, lookback_days: int = 180) -> dict:
         with _ibkr_connection() as (ib, ib_module, cfg):
             contract = _stock_contract(ib_module, ibkr_ticker)
             with _ticker_timeout(cfg["timeout_seconds"], original_ticker, "historical bars"):
-                qualified = ib.qualifyContracts(contract)
-                if not qualified:
-                    return _error_response(original_ticker, f"IBKR could not qualify stock contract for {original_ticker} using symbol {ibkr_ticker}.", error_type="symbol")
+                qualified, qualification_error = _qualify_contracts(ib, contract, original_ticker, "stock")
+                if qualification_error:
+                    return qualification_error
                 duration_days = max(int(lookback_days or 1), 1)
                 bars = ib.reqHistoricalData(
                     qualified[0],
@@ -506,12 +633,17 @@ def get_ibkr_historical_bars(ticker: str, lookback_days: int = 180) -> dict:
             )
     except _IbkrTimeoutError as exc:
         return _error_response(original_ticker, str(exc), error_type="timeout")
+    except _IbkrProviderError as exc:
+        return _provider_error_response(original_ticker, exc, "historical bars")
     except Exception as exc:
-        return _error_response(original_ticker, f"IBKR historical bars unavailable: {exc}")
+        return _provider_error_response(original_ticker, exc, "historical bars")
 
 
 def _get_ibkr_quote_snapshot(ticker: str, market_data_type: int | None = None, label: str = "snapshot") -> dict:
     original_ticker = str(ticker or "").strip().upper()
+    blocked = _non_stock_symbol_error(original_ticker)
+    if blocked:
+        return blocked
     normalized_result = _normalize_for_ibkr(original_ticker)
     if not normalized_result.get("ok"):
         return _error_response(original_ticker, normalized_result.get("error", "Ticker normalization failed."), error_type="symbol")
@@ -525,9 +657,9 @@ def _get_ibkr_quote_snapshot(ticker: str, market_data_type: int | None = None, l
                 pass
             contract = _stock_contract(ib_module, ibkr_ticker)
             with _ticker_timeout(cfg["timeout_seconds"], original_ticker, "quote snapshot"):
-                qualified = ib.qualifyContracts(contract)
-                if not qualified:
-                    return _error_response(original_ticker, f"IBKR could not qualify stock contract for {original_ticker} using symbol {ibkr_ticker}.", error_type="symbol")
+                qualified, qualification_error = _qualify_contracts(ib, contract, original_ticker, "stock")
+                if qualification_error:
+                    return qualification_error
                 contract = qualified[0]
                 ticker_data = ib.reqMktData(contract, "", True, False)
                 ib.sleep(2)
@@ -584,8 +716,10 @@ def _get_ibkr_quote_snapshot(ticker: str, market_data_type: int | None = None, l
             )
     except _IbkrTimeoutError as exc:
         return _error_response(original_ticker, str(exc), error_type="timeout")
+    except _IbkrProviderError as exc:
+        return _provider_error_response(original_ticker, exc, "quote")
     except Exception as exc:
-        return _error_response(original_ticker, f"IBKR quote unavailable: {exc}")
+        return _provider_error_response(original_ticker, exc, "quote")
 
 
 def get_ibkr_live_quote(ticker: str) -> dict:
@@ -699,6 +833,7 @@ def get_ibkr_options_chain(
                 error="IBKR option chain metadata is reachable, but option quote snapshots are unavailable. OPRA/options market data permissions may be missing.",
             )
     except Exception as exc:
+        message, error_type = _normalized_provider_error(exc, operation="options chain")
         return _response(
             False,
             normalized_ticker,
@@ -711,9 +846,9 @@ def get_ibkr_options_chain(
                     "max_days_to_expiration": max_days_to_expiration,
                 },
             },
-            error=f"IBKR options chain unavailable: {exc}",
+            error=message,
             source=UNAVAILABLE_SOURCE,
-        )
+        ) | {"error_type": error_type, "provider": SOURCE_NAME}
 
 
 def _diagnose_ibkr_option_quotes_connected(
@@ -920,8 +1055,9 @@ def diagnose_ibkr_option_quotes(ticker: str = "AAPL", max_contracts: int = 5) ->
             errors.extend(diagnostic["errors"])
             permissions_summary = diagnostic["permissions_summary"]
     except Exception as exc:
-        errors.append(str(exc))
-        permissions_summary["errors"].append(str(exc))
+        message, _error_type = _normalized_provider_error(exc, operation="option quote diagnostic")
+        errors.append(message)
+        permissions_summary["errors"].append(message)
 
     if permissions_summary.get("likely_missing_opra"):
         warnings.append("Options final recommendations should remain blocked until option quotes are available.")

@@ -804,6 +804,7 @@ def execute_adaptive_scan_plan(
     db_path: str = "strategy_library.db",
     message: str | None = None,
     provider: str | None = None,
+    internal_controls: dict | None = None,
 ) -> dict:
     initial_validation = validate_scan_plan(proposed_plan, runtime_context=runtime_context)
     root_run_id = _as_dict(initial_validation.get("approved_plan")).get("request_id") or str(uuid4())
@@ -834,6 +835,7 @@ def execute_adaptive_scan_plan(
     stop_reason = ""
     refinement_used = False
     refinement_provider = "none"
+    controls = _as_dict(internal_controls)
 
     for pass_number in range(1, max_passes + 1):
         pass_plan = deepcopy(current_plan)
@@ -881,7 +883,12 @@ def execute_adaptive_scan_plan(
             approved,
             runtime_context=runtime_context,
             db_path=db_path,
-            internal_controls={"run_current_research": False, "run_option_discovery": False, "record_learning": False},
+            internal_controls={
+                **controls,
+                "run_current_research": False,
+                "run_option_discovery": False,
+                "record_learning": False,
+            },
         )
         evaluation = evaluate_scan_pass(execution_result, approved, pass_number)
         pass_result["execution_result"] = execution_result

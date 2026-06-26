@@ -983,6 +983,32 @@ def test_review_ticker_opportunity_returns_status_and_reasons(monkeypatch):
     assert tsla["failed_constraints"]
 
 
+def test_review_ticker_opportunity_returns_ranking_unavailable_for_provider_failure(monkeypatch):
+    provider_error = "IBKR client ID is already in use. Close stale TWS sessions or use a unique IBKR_CLIENT_ID."
+    monkeypatch.setattr(
+        "agent.trading_brain.get_market_snapshot",
+        lambda ticker, lookback_days=180: {
+            "ok": False,
+            "ticker": ticker,
+            "source": "unavailable",
+            "error": provider_error,
+            "error_type": "provider",
+            "data": None,
+        },
+    )
+
+    result = review_ticker_opportunity("AAPL")
+
+    assert result["ok"] is True
+    assert result["status"] == "ranking_unavailable"
+    assert result["ticker"] == "AAPL"
+    assert result["candidate"] is None
+    assert result["decision"] is None
+    assert provider_error in result["warnings"]
+    assert provider_error in result["reasons"]
+    assert result["market_snapshot"]["error_type"] == "provider"
+
+
 def test_review_ticker_opportunity_attaches_research_brief(monkeypatch):
     snapshot = {
         "ok": True,
