@@ -79,7 +79,7 @@ POLYGON_API_KEY=
 FMP_API_KEY=
 PINECONE_API_KEY=
 PINECONE_INDEX_NAME=
-SEC_USER_AGENT="TradingAI Your Name email@example.com"
+SEC_USER_AGENT=
 ```
 
 Optional scheduler and local alert settings:

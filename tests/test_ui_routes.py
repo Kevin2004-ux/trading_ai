@@ -19,6 +19,193 @@ else:
     client = None
 
 
+@pytest.fixture(autouse=True)
+def _force_deterministic_ai_planner(monkeypatch):
+    monkeypatch.setenv("AI_PLANNER_PROVIDER", "deterministic")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
+def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_options: bool = False):
+    def fake_execute_scan_plan(proposed_plan, runtime_context=None, db_path="strategy_library.db"):
+        plan_payload = proposed_plan.model_dump(mode="json") if hasattr(proposed_plan, "model_dump") else dict(proposed_plan or {})
+        requested = plan_payload.get("requested_instrument", "stocks")
+        resolved_include_options = include_options or requested == "options" or bool(plan_payload.get("include_options"))
+        captured.update(
+            {
+                "proposed_plan": plan_payload,
+                "runtime_context": runtime_context or {},
+                "db_path": db_path,
+                "include_options": resolved_include_options,
+                "prefer_options": bool(plan_payload.get("prefer_options")),
+            }
+        )
+        option_rows = [
+            {"ticker": ticker, "asset_type": "option", "status": "research_only", "rank": 1, "opportunity_score": 70}
+        ] if resolved_include_options else []
+        policy_validation = {
+            "ok": True,
+            "policy_version": "scan_policy_v1",
+            "approved_plan": {
+                "requested_instrument": requested,
+                "include_options": resolved_include_options,
+                "prefer_options": bool(plan_payload.get("prefer_options")),
+                "universes": plan_payload.get("universes", ["large_cap", "active", "tech"]),
+                "research_preferences": plan_payload.get("research_preferences", {}),
+                "refinement": plan_payload.get("refinement", {"max_passes": 1}),
+            },
+            "execution_config": {
+                "include_options": resolved_include_options,
+                "prefer_options": bool(plan_payload.get("prefer_options")),
+                "paper_trading_only": True,
+                "brokerage_execution_enabled": False,
+            },
+        }
+        return {
+            "ok": True,
+            "execution_version": "scan_plan_executor_v1",
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "policy_validation": policy_validation,
+            "approved_plan": {
+                "requested_instrument": requested,
+                "include_options": resolved_include_options,
+                "prefer_options": bool(plan_payload.get("prefer_options")),
+                "universes": plan_payload.get("universes", ["large_cap", "active", "tech"]),
+            },
+            "execution_config": {
+                "include_options": resolved_include_options,
+                "prefer_options": bool(plan_payload.get("prefer_options")),
+                "options_final_eligibility": False,
+                "paper_trading_only": True,
+                "brokerage_execution_enabled": False,
+            },
+            "execution_summary": {
+                "status": "completed",
+                "universes_requested": plan_payload.get("universes", ["large_cap", "active", "tech"]),
+                "universes_used": plan_payload.get("universes", ["large_cap", "active", "tech"]),
+                "auto_log": False,
+                "include_options": resolved_include_options,
+            },
+            "trading_result": {"ok": True, "decision_result": {"logged_recommendations": []}},
+            "option_discovery": {
+                "status": "available" if resolved_include_options else "disabled",
+                "options_final_eligibility": False,
+                "paper_eligible_contracts": [],
+                "research_only_contracts": [],
+                "blocked_contracts": [],
+                "underlying_watchlist": [],
+            },
+            "best_available_ideas": {
+                "ok": True,
+                "ranking_status": "available",
+                "option_discovery_status": "available" if resolved_include_options else "disabled",
+                "option_data_missing": [],
+                "paper_eligible": [],
+                "stock_watchlist": [
+                    {"ticker": ticker, "asset_type": "stock", "recommendation_status": "watchlist", "score": 80, "idea_score": 80}
+                ],
+                "option_research_only": [
+                    {"ticker": ticker, "asset_type": "option", "recommendation_status": "research_only", "score": 70, "idea_score": 70}
+                ] if resolved_include_options else [],
+                "option_underlying_watchlist": [],
+                "blocked_but_interesting": [],
+                "why_no_final_trades": ["No final paper trades passed strict objective gates."],
+                "data_missing": [],
+                "system_issues": [],
+                "next_steps": [],
+                "warnings": [],
+            },
+            "assistant_response": {
+                "ok": True,
+                "response_type": "trade_ideas",
+                "paper_trading_only": True,
+                "ranking_status": "available",
+                "requested_instrument": requested,
+                "market_state": {"provider_status": "available", "market_regime": None, "data_freshness": None, "partial_results": False, "message": None},
+                "top_stocks": [
+                    {"ticker": ticker, "asset_type": "stock", "status": "watchlist", "rank": 1, "opportunity_score": 80}
+                ] if requested != "options" else [],
+                "top_options": option_rows,
+                "option_underlying_watchlist": [],
+                "option_discovery_status": "available" if resolved_include_options else "disabled",
+                "option_data_missing": [],
+                "paper_eligible": [],
+                "research_only": [],
+                "blocked": [],
+                "why_no_final_trades": ["No final paper trades passed strict objective gates."],
+                "data_missing": [],
+                "system_issues": [],
+                "next_steps": [],
+                "scan_summary": {"include_options": resolved_include_options, "profiles_run": []},
+                "refinement": {"used": False, "passes_executed": 1, "stop_reason": "", "changes": [], "warnings": []},
+            },
+            "formatted_response": "No final paper trades passed strict gates today.\nTop stock research ideas:",
+            "warnings": [],
+            "errors": [],
+        }
+
+    return fake_execute_scan_plan
+
+
+def _fake_adaptive_execution(captured: dict, ticker: str = "AAPL", include_options: bool = False):
+    single_scan = _fake_planned_execution(captured, ticker=ticker, include_options=include_options)
+
+    def fake_execute_adaptive_scan_plan(proposed_plan, runtime_context=None, db_path="strategy_library.db", message=None, provider=None):
+        base = single_scan(proposed_plan, runtime_context=runtime_context, db_path=db_path)
+        assistant = dict(base["assistant_response"])
+        assistant["refinement"] = {
+            "used": False,
+            "passes_executed": 1,
+            "stop_reason": "Sufficient legitimate research results found.",
+            "changes": [],
+            "warnings": [],
+        }
+        return {
+            "ok": True,
+            "adaptive_execution_version": "adaptive_scan_v1",
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "status": "completed",
+            "request_id": "adaptive-test",
+            "root_run_id": "adaptive-test",
+            "initial_plan": base["policy_validation"]["approved_plan"],
+            "initial_policy_validation": base["policy_validation"],
+            "max_passes": 2,
+            "passes_executed": 1,
+            "stop_reason": "Sufficient legitimate research results found.",
+            "refinement_used": False,
+            "refinement_provider": "none",
+            "passes": [
+                {
+                    "pass_number": 1,
+                    "run_id": "adaptive-test:pass-1",
+                    "parent_run_id": "adaptive-test",
+                    "plan_fingerprint": "fakefingerprint1",
+                    "proposed_plan": proposed_plan,
+                    "policy_validation": base["policy_validation"],
+                    "approved_plan": base["policy_validation"]["approved_plan"],
+                    "execution_summary": base["execution_summary"],
+                    "evaluation": {"ranking_status": "available", "sufficient_results": True},
+                    "refinement_proposal": None,
+                    "result_summary": {"ranking_status": "available"},
+                    "execution_result": base,
+                    "warnings": [],
+                    "errors": [],
+                }
+            ],
+            "consolidated_result": base["trading_result"],
+            "best_available_ideas": base["best_available_ideas"],
+            "assistant_response": assistant,
+            "option_discovery": base["option_discovery"],
+            "research": {"ok": True, "status": "disabled", "dossiers": [], "warnings": [], "errors": []},
+            "formatted_response": base["formatted_response"],
+            "warnings": [],
+            "errors": [],
+        }
+
+    return fake_execute_adaptive_scan_plan
+
+
 def test_ui_route_test_dependencies_are_present_or_reported_cleanly():
     if not UI_ROUTE_TEST_DEPS_AVAILABLE:
         pytest.skip("fastapi/httpx is not installed in the local test environment.")
@@ -57,9 +244,21 @@ def test_ui_app_exposes_expected_route_paths():
     assert "/api/jobs" in route_paths
     assert "/api/reports/performance" in route_paths
     assert "/api/stress/scenarios" in route_paths
+    assert "/api/planning/validate" in route_paths
+    assert "/api/planning/propose" in route_paths
+    assert "/api/planning/execute" in route_paths
+    assert "/api/planning/execute-adaptive" in route_paths
+    assert "/api/research/current" in route_paths
+    assert "/api/learning/status" in route_paths
+    assert "/api/learning/grade-outcomes" in route_paths
+    assert "/api/learning/evaluate-policy" in route_paths
+    assert "/api/learning/proposals" in route_paths
+    assert "/api/learning/promote" in route_paths
+    assert "/api/learning/policies" in route_paths
     assert "/api/chat" in route_paths
     assert "/api/scan" in route_paths
     assert "/api/options/strategies" in route_paths
+    assert "/api/options/discover" in route_paths
     assert "/api/annotations" in route_paths
     assert "/api/system/config-check" in route_paths
     assert "/api/system/readiness-check" in route_paths
@@ -71,7 +270,8 @@ def test_ui_app_exposes_expected_route_paths():
     for path in route_paths:
         normalized_path = path.lower()
         assert "brokerage" not in normalized_path
-        assert "execute" not in normalized_path
+        if normalized_path not in {"/api/planning/execute", "/api/planning/execute-adaptive"}:
+            assert "execute" not in normalized_path
         assert "/order" not in normalized_path
         assert "/buy" not in normalized_path
         assert "/sell" not in normalized_path
@@ -170,6 +370,325 @@ def test_diagnostics_live_dry_run_route_returns_summary(monkeypatch):
     assert response.status_code == 200
     assert response.json()["ticker"] == "AAPL"
     assert captured["include_memory"] is True
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_planning_validate_route_is_diagnostic_only(monkeypatch):
+    def forbidden_scan(**kwargs):
+        raise AssertionError("Planning validation route must not execute scans.")
+
+    monkeypatch.setattr("ui.app.run_paper_trade_cycle", forbidden_scan)
+    monkeypatch.setattr("ui.app.run_weekly_trade_hunt", forbidden_scan)
+
+    response = client.post(
+        "/api/planning/validate",
+        json={
+            "plan": {
+                "requested_instrument": "stocks",
+                "include_options": True,
+                "universes": ["fake", "large_cap"],
+            },
+            "runtime_context": {"safe_to_run_options": False},
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["policy_version"] == "scan_policy_v1"
+    assert payload["execution_config"]["include_options"] is False
+    assert payload["execution_config"]["brokerage_execution_enabled"] is False
+    assert "large_cap" in payload["execution_config"]["universes"]
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_planning_propose_route_is_non_executing(monkeypatch):
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("Planning proposal route must not execute scans or trades.")
+
+    monkeypatch.setattr("ui.app.execute_scan_plan", forbidden_scan)
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", forbidden_scan)
+    monkeypatch.setattr("ui.app.run_paper_trade_cycle", forbidden_scan)
+    monkeypatch.setattr("ui.app.run_weekly_trade_hunt", forbidden_scan)
+
+    response = client.post(
+        "/api/planning/propose",
+        json={
+            "message": "Give me best stock ideas. Do not include options.",
+            "runtime_context": {"safe_to_run_options": False},
+            "request_id": "ui-propose-1",
+            "provider": "deterministic",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["planner_version"] == "ai_scan_planner_v1"
+    assert payload["status"] == "deterministic_planned"
+    assert payload["approved_plan"]["requested_instrument"] == "stocks"
+    assert payload["approved_plan"]["include_options"] is False
+    assert payload["policy_validation"]["execution_config"]["brokerage_execution_enabled"] is False
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_research_current_route_is_research_only(monkeypatch):
+    captured = {}
+
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("Research route must not execute scans, trading brain, logging, or brokerage logic.")
+
+    monkeypatch.setattr("ui.app.execute_scan_plan", forbidden_scan)
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", forbidden_scan)
+    monkeypatch.setattr("ui.app.run_paper_trade_cycle", forbidden_scan)
+    monkeypatch.setattr("ui.app.run_weekly_trade_hunt", forbidden_scan)
+    monkeypatch.setattr(
+        "ui.app.build_current_research",
+        lambda tickers, **kwargs: captured.update({"tickers": tickers, **kwargs}) or {
+            "ok": True,
+            "research_version": "current_research_v1",
+            "status": "available",
+            "provider": "local",
+            "model": None,
+            "request_id": kwargs.get("request_id"),
+            "as_of": "2026-06-22T12:00:00Z",
+            "web_search_used": False,
+            "local_research_used": True,
+            "cache_hit": False,
+            "tickers_requested": tickers,
+            "tickers_researched": tickers,
+            "scopes_requested": kwargs.get("scopes") or [],
+            "dossiers": [],
+            "sources": [],
+            "warnings": [],
+            "errors": [],
+            "usage": {"input_tokens": None, "output_tokens": None, "total_tokens": None, "web_search_calls": 0, "extraction_calls": 0},
+        },
+    )
+
+    response = client.post(
+        "/api/research/current",
+        json={"tickers": ["AAPL"], "scopes": ["company_news"], "provider": "local", "request_id": "research-route-1"},
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["research_version"] == "current_research_v1"
+    assert captured["tickers"] == ["AAPL"]
+    assert captured["provider"] == "local"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_learning_status_route_returns_learning_readiness(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "ui.app.get_learning_status",
+        lambda db_path="strategy_library.db": captured.update({"db_path": db_path}) or {
+            "ok": True,
+            "learning_version": "research_learning_v1",
+            "status": "collecting_data",
+            "active_policy_version": "research_policy_v1_baseline",
+            "promotion_ready": False,
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+    response = client.get("/api/learning/status?db_path=test-learning.db")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["learning_version"] == "research_learning_v1"
+    assert payload["promotion_ready"] is False
+    assert captured["db_path"] == "test-learning.db"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_learning_grade_outcomes_route_calls_grader(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "ui.app.grade_mature_candidate_outcomes",
+        lambda **kwargs: captured.update(kwargs) or {
+            "ok": True,
+            "grading_version": "candidate_outcome_v1",
+            "snapshots_considered": 1,
+            "outcomes_created": 1,
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+    response = client.post(
+        "/api/learning/grade-outcomes",
+        json={"db_path": "test-learning.db", "as_of": "2026-06-22", "horizons": [5, 10]},
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["grading_version"] == "candidate_outcome_v1"
+    assert captured == {"db_path": "test-learning.db", "as_of": "2026-06-22", "horizons": [5, 10]}
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_learning_evaluate_policy_route_is_diagnostic_only(monkeypatch):
+    captured = {}
+
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("Learning policy evaluation must not execute scans or trades.")
+
+    monkeypatch.setattr("ui.app.run_paper_trade_cycle", forbidden_scan)
+    monkeypatch.setattr("ui.app.run_weekly_trade_hunt", forbidden_scan)
+    monkeypatch.setattr(
+        "ui.app.evaluate_policy_walk_forward",
+        lambda candidate_policy, **kwargs: captured.update({"candidate_policy": candidate_policy, **kwargs}) or {
+            "ok": True,
+            "evaluation_version": "policy_walk_forward_v1",
+            "status": "insufficient_data",
+            "promotion_eligibility": {"promotion_eligible": False, "automatic_promotion_allowed": False},
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+    response = client.post(
+        "/api/learning/evaluate-policy",
+        json={
+            "candidate_policy": {"policy_version": "research_policy_v1"},
+            "baseline_policy_version": "research_policy_v1_baseline",
+            "config": {"horizon_sessions": 5},
+            "db_path": "test-learning.db",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["promotion_eligibility"]["automatic_promotion_allowed"] is False
+    assert captured["candidate_policy"]["policy_version"] == "research_policy_v1"
+    assert captured["baseline_policy_version"] == "research_policy_v1_baseline"
+    assert captured["db_path"] == "test-learning.db"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_learning_proposals_and_policies_routes_are_research_only(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "ui.app.create_policy_proposal",
+        lambda proposed_policy, **kwargs: captured.update({"proposed_policy": proposed_policy, **kwargs}) or {
+            "ok": True,
+            "proposal": {"id": 1, "status": "shadow", "promotion_eligibility_json": {"promotion_eligible": False}},
+            "evaluation": {"status": "insufficient_data"},
+            "errors": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(
+        "ui.app.list_policies",
+        lambda db_path="strategy_library.db", include_policy_json=True: {
+            "ok": True,
+            "policies": [{"policy_version": "research_policy_v1_baseline", "status": "active"}],
+            "count": 1,
+            "errors": [],
+        },
+    )
+
+    proposal_response = client.post(
+        "/api/learning/proposals",
+        json={"proposed_policy": {"policy_version": "research_policy_v1"}, "created_by": "tester", "db_path": "test-learning.db"},
+    )
+    policies_response = client.get("/api/learning/policies?db_path=test-learning.db")
+
+    assert proposal_response.status_code == 200
+    assert proposal_response.json()["proposal"]["status"] == "shadow"
+    assert captured["created_by"] == "tester"
+    assert captured["db_path"] == "test-learning.db"
+    assert policies_response.status_code == 200
+    assert policies_response.json()["policies"][0]["status"] == "active"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_learning_promote_route_requires_manual_confirmation(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "ui.app.promote_policy_proposal",
+        lambda **kwargs: captured.update(kwargs) or {
+            "ok": False,
+            "promoted": False,
+            "errors": ["confirm must be true for manual promotion."],
+            "warnings": [],
+        },
+    )
+
+    response = client.post(
+        "/api/learning/promote",
+        json={
+            "proposal_id": 1,
+            "approved_by": "human",
+            "approval_reason": "manual review",
+            "expected_current_policy_version": "research_policy_v1_baseline",
+            "confirm": False,
+            "db_path": "test-learning.db",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["promoted"] is False
+    assert captured["confirm"] is False
+    assert captured["approved_by"] == "human"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_planning_execute_route_calls_executor_without_logging(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("ui.app.execute_scan_plan", _fake_planned_execution(captured, ticker="AAPL"))
+
+    response = client.post(
+        "/api/planning/execute",
+        json={
+            "plan": {"requested_instrument": "stocks", "universes": ["large_cap"], "max_tickers": 3},
+            "runtime_context": {"safe_to_run_options": False},
+            "db_path": "test.db",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["execution_summary"]["auto_log"] is False
+    assert payload["brokerage_execution_enabled"] is False
+    assert payload["trading_result"]["decision_result"]["logged_recommendations"] == []
+    assert captured["db_path"] == "test.db"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_planning_execute_adaptive_route_calls_adaptive_executor(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="AAPL"))
+
+    response = client.post(
+        "/api/planning/execute-adaptive",
+        json={
+            "plan": {"requested_instrument": "stocks", "universes": ["large_cap"], "max_tickers": 3, "refinement": {"max_passes": 2}},
+            "runtime_context": {"safe_to_run_options": False},
+            "message": "Best stock ideas. No options.",
+            "provider": "deterministic",
+            "db_path": "test.db",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["adaptive_execution_version"] == "adaptive_scan_v1"
+    assert payload["brokerage_execution_enabled"] is False
+    assert payload["paper_trading_only"] is True
+    assert payload["consolidated_result"]["decision_result"]["logged_recommendations"] == []
+    assert captured["db_path"] == "test.db"
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
@@ -511,7 +1030,9 @@ def test_journal_reviews_route_returns_reviews(monkeypatch):
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
 def test_api_chat_route_returns_structured_assistant_response(monkeypatch):
-    monkeypatch.setattr("ui.app.ask_translator", lambda message: f"answer: {message}")
+    captured = {}
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+    monkeypatch.setattr("ui.app.execute_scan_plan", _fake_planned_execution(captured, ticker="AAPL"))
 
     response = client.post("/api/chat", json={"message": "Review AAPL"})
 
@@ -520,6 +1041,8 @@ def test_api_chat_route_returns_structured_assistant_response(monkeypatch):
     assert payload["ok"] is True
     assert payload["paper_trading_only"] is True
     assert payload["validation"]["deterministic_engine_source_of_truth"] is True
+    assert payload["planner"]["intent"]["objective"] == "ticker_review"
+    assert captured["proposed_plan"]["custom_tickers"] == ["AAPL"]
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
@@ -530,21 +1053,7 @@ def test_api_chat_returns_deterministic_fallback_when_gemini_unavailable(monkeyp
         lambda message: "Sorry, the AI translator is unavailable right now because the Gemini runtime is not fully configured.",
     )
     monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
-    monkeypatch.setattr(
-        "ui.app.run_paper_trade_cycle",
-        lambda **kwargs: captured.update(kwargs) or {
-            "ok": True,
-            "mode": "paper_trading",
-            "decision_result": {"final_recommendations": []},
-            "selection_result": {
-                "watchlist_alternatives": [
-                    {"ticker": "AAPL", "asset_type": "stock", "recommendation_status": "watchlist", "score": 80, "risk_reward": 2.2}
-                ]
-            },
-            "summary": {"selected_count": 0, "logged_count": 0},
-            "errors": [],
-        },
-    )
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="AAPL"))
 
     response = client.post("/api/chat", json={"message": "Find the best trades this week"})
 
@@ -554,7 +1063,15 @@ def test_api_chat_returns_deterministic_fallback_when_gemini_unavailable(monkeyp
     assert payload["mode"] == "deterministic_fallback"
     assert payload["gemini_available"] is False
     assert payload["best_available_ideas"]["stock_watchlist"][0]["ticker"] == "AAPL"
-    assert captured["min_trades"] == 0
+    assert payload["assistant_response"]["response_type"] == "trade_ideas"
+    assert payload["assistant_response"]["top_stocks"][0]["ticker"] == "AAPL"
+    assert payload["policy_validation"]["policy_version"] == "scan_policy_v1"
+    assert payload["planner"]["planner_version"] == "ai_scan_planner_v1"
+    assert payload["planner_status"] == "deterministic_planned"
+    assert payload["planner_provider"] == "deterministic"
+    assert payload["planner_fallback_used"] is False
+    assert payload["approved_plan"]["universes"] == ["large_cap", "active", "tech"]
+    assert captured["proposed_plan"]["universes"] == ["large_cap", "active", "tech"]
     assert captured["include_options"] is False
 
 
@@ -562,27 +1079,7 @@ def test_api_chat_returns_deterministic_fallback_when_gemini_unavailable(monkeyp
 def test_api_chat_stock_only_request_sends_include_options_false(monkeypatch):
     captured = {}
     monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
-
-    def fake_run_paper_trade_cycle(**kwargs):
-        asyncio.get_event_loop()
-        captured.update(kwargs)
-        return {
-            "ok": True,
-            "mode": "paper_trading",
-            "decision_result": {"final_recommendations": []},
-            "selection_result": {
-                "watchlist_alternatives": [
-                    {"ticker": "NVDA", "asset_type": "stock", "recommendation_status": "watchlist", "score": 79}
-                ]
-            },
-            "summary": {"selected_count": 0, "logged_count": 0},
-            "errors": [],
-        }
-
-    monkeypatch.setattr(
-        "ui.app.run_paper_trade_cycle",
-        fake_run_paper_trade_cycle,
-    )
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="NVDA"))
 
     response = client.post("/api/chat", json={"message": "Give me your best stock ideas right now. Do stock only. Do not include options."})
 
@@ -592,7 +1089,10 @@ def test_api_chat_stock_only_request_sends_include_options_false(monkeypatch):
     assert captured["include_options"] is False
     assert captured["prefer_options"] is False
     assert payload["raw_result"]["include_options"] is False
+    assert payload["raw_result"]["planner_status"] == "deterministic_planned"
     assert payload["best_available_ideas"]["option_research_only"] == []
+    assert payload["assistant_response"]["requested_instrument"] == "stocks"
+    assert payload["assistant_response"]["top_options"] == []
     assert "There is no current event loop" not in str(payload)
 
 
@@ -609,27 +1109,7 @@ def test_api_chat_stock_only_request_sends_include_options_false(monkeypatch):
 def test_api_chat_best_available_stock_ideas_trigger_deterministic_scan(monkeypatch, message):
     captured = {}
     monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
-
-    def fake_run_paper_trade_cycle(**kwargs):
-        asyncio.get_event_loop()
-        captured.update(kwargs)
-        return {
-            "ok": True,
-            "mode": "paper_trading",
-            "decision_result": {"final_recommendations": []},
-            "selection_result": {
-                "watchlist_alternatives": [
-                    {"ticker": "V", "asset_type": "stock", "recommendation_status": "watchlist", "score": 88, "risk_reward": 2.0}
-                ],
-                "rejected_candidates": [
-                    {"ticker": "AAPL", "asset_type": "stock", "recommendation_status": "rejected", "score": 77, "rejection_reason": "Failed relative volume."}
-                ],
-            },
-            "summary": {"selected_count": 0, "logged_count": 0},
-            "errors": [],
-        }
-
-    monkeypatch.setattr("ui.app.run_paper_trade_cycle", fake_run_paper_trade_cycle)
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="V"))
 
     response = client.post("/api/chat", json={"message": message})
 
@@ -642,30 +1122,63 @@ def test_api_chat_best_available_stock_ideas_trigger_deterministic_scan(monkeypa
     assert payload["raw_result"]["include_options"] is False
     assert payload["best_available_ideas"]["stock_watchlist"][0]["ticker"] == "V"
     assert payload["best_available_ideas"]["option_research_only"] == []
+    assert payload["assistant_response"]["top_stocks"][0]["ticker"] == "V"
+    assert payload["assistant_response"]["top_options"] == []
     assert "Use the Scan, Trades, Performance" not in payload["answer"]
+    assert payload["planner_status"] == "deterministic_planned"
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
 def test_api_chat_options_request_can_send_include_options_true(monkeypatch):
     captured = {}
     monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
-    monkeypatch.setattr(
-        "ui.app.run_paper_trade_cycle",
-        lambda **kwargs: captured.update(kwargs) or {
-            "ok": True,
-            "mode": "paper_trading",
-            "decision_result": {"final_recommendations": []},
-            "selection_result": {"watchlist_alternatives": []},
-            "summary": {"selected_count": 0, "logged_count": 0},
-            "errors": [],
-        },
-    )
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="AAPL", include_options=True))
 
     response = client.post("/api/chat", json={"message": "Give me the best option ideas"})
 
     assert response.status_code == 200
     assert captured["include_options"] is True
-    assert captured["prefer_options"] is False
+    assert captured["prefer_options"] is True
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_current_news_sets_research_preferences(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="AAPL"))
+
+    response = client.post("/api/chat", json={"message": "Give me the best stocks and check current news. Do stock only."})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["proposed_plan"]["research_preferences"]["include_news"] is True
+    assert captured["include_options"] is False
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_status_question_does_not_execute_scan(monkeypatch):
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError("Status chat must not execute a market scan.")
+
+    monkeypatch.setattr("ui.app.execute_scan_plan", forbidden_scan)
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", forbidden_scan)
+    monkeypatch.setattr("ui.app.check_runtime_readiness", lambda config=None, include_live_checks=False: {"ok": True, "categories": {}, "warnings": [], "errors": []})
+    monkeypatch.setattr("ui.app.get_paper_trading_summary", lambda db_path="strategy_library.db": {"ok": True, "summary": {}})
+    monkeypatch.setattr("ui.app.list_alerts", lambda **kwargs: {"ok": True, "alerts": []})
+    monkeypatch.setattr("ui.app.get_win_loss_record", lambda db_path="strategy_library.db": {"ok": True})
+    monkeypatch.setattr("ui.app.get_strategy_performance", lambda db_path="strategy_library.db": {"ok": True})
+    monkeypatch.setattr("ui.app.validate_schema", lambda db_path="strategy_library.db": {"ok": True, "errors": []})
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+
+    response = client.post("/api/chat", json={"message": "What is the system status?"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["mode"] == "deterministic_status"
+    assert payload["status_payload"]["ok"] is True
+    assert "scan was run" in payload["answer"]
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
@@ -699,6 +1212,8 @@ def test_api_scan_includes_best_available_ideas(monkeypatch):
     assert response.status_code == 200
     assert payload["ok"] is True
     assert payload["best_available_ideas"]["stock_watchlist"][0]["ticker"] == "MSFT"
+    assert payload["assistant_response"]["response_type"] == "trade_ideas"
+    assert payload["assistant_response"]["top_stocks"][0]["ticker"] == "MSFT"
     assert "No final paper trades" in payload["formatted_best_ideas_summary"]
     assert captured["include_options"] is False
     assert captured["prefer_options"] is False
@@ -777,6 +1292,66 @@ def test_api_options_strategies_returns_blocked_payload_when_chain_unavailable(m
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_options_discover_route_is_research_only_and_validates_tickers(monkeypatch):
+    captured = {}
+
+    def fake_discover(stock_candidates, explicit_tickers=None, option_preferences=None, runtime_context=None, max_underlyings=5, max_contracts_per_ticker=3):
+        captured.update(
+            {
+                "stock_candidates": stock_candidates,
+                "explicit_tickers": explicit_tickers,
+                "option_preferences": option_preferences,
+                "runtime_context": runtime_context,
+                "max_underlyings": max_underlyings,
+                "max_contracts_per_ticker": max_contracts_per_ticker,
+            }
+        )
+        return {
+            "ok": True,
+            "discovery_version": "option_discovery_v1",
+            "status": "partial",
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "requested": True,
+            "provider_status": "degraded",
+            "options_final_eligibility": False,
+            "underlyings_considered": [],
+            "underlying_shortlist": [],
+            "contracts_evaluated": 0,
+            "strategies_evaluated": 0,
+            "paper_eligible_contracts": [],
+            "research_only_contracts": [],
+            "blocked_contracts": [],
+            "underlying_watchlist": [{"ticker": "AAPL"}],
+            "missing_requirements": ["bid/ask"],
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("ui.app.discover_option_ideas", fake_discover)
+
+    response = client.post(
+        "/api/options/discover",
+        json={
+            "tickers": ["AAPL"],
+            "option_preferences": {"min_dte": 14, "max_dte": 45},
+            "runtime_context": {"safe_to_run_options": False},
+            "max_underlyings": 1,
+            "max_contracts_per_ticker": 2,
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "partial"
+    assert payload["paper_trading_only"] is True
+    assert payload["brokerage_execution_enabled"] is False
+    assert captured["explicit_tickers"] == ["AAPL"]
+    assert captured["runtime_context"]["requested"] is True
+    assert captured["max_contracts_per_ticker"] == 2
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
 def test_api_annotation_route_saves_human_annotation(monkeypatch):
     captured = {}
     monkeypatch.setattr(
@@ -819,6 +1394,23 @@ def test_api_status_and_frontend_debug_are_safe(monkeypatch):
     assert status["backend"] == "running"
     assert status["brokerage_execution_enabled"] is False
     assert status["frontend_bridge"] == "ready"
+    assert status["ai_planner_provider"] == "deterministic"
+    assert status["ai_planner_available"] is False
+    assert "openai_planner_model" in status
+    assert "ai_research_provider" in status
+    assert "openai_research_configured" in status
+    assert "research_max_tickers" in status
     assert debug["ok"] is True
     assert debug["secrets_exposed"] is False
     assert "GEMINI_API_KEY" not in str(debug)
+
+
+def test_chat_frontend_renders_clickable_sources_safely():
+    source = open("/Users/kevinfrederick/trading_ai/frontend/components/ideas/ResearchSources.tsx", encoding="utf-8").read()
+    normalizer = open("/Users/kevinfrederick/trading_ai/frontend/lib/tradingTypes.ts", encoding="utf-8").read()
+
+    assert 'target="_blank"' in source
+    assert 'rel="noopener noreferrer"' in source
+    assert "dangerouslySetInnerHTML" not in source
+    assert "safeHttpUrl" in source
+    assert 'url.protocol === "http:" || url.protocol === "https:"' in normalizer

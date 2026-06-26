@@ -9,6 +9,35 @@ from options.strategy_selector import select_best_option_strategy
 from realtime.options_chain import normalize_options_chain
 
 
+SUPPORTED_OPTION_STRATEGY_TYPES = (
+    "long_call",
+    "long_put",
+    "bull_call_debit_spread",
+    "bear_put_debit_spread",
+    "covered_call_research",
+    "cash_secured_put_research",
+    "call_credit_spread_research",
+    "put_credit_spread_research",
+)
+
+BULLISH_OPTION_STRATEGY_TYPES = (
+    "long_call",
+    "bull_call_debit_spread",
+    "put_credit_spread_research",
+    "cash_secured_put_research",
+)
+
+BEARISH_OPTION_STRATEGY_TYPES = (
+    "long_put",
+    "bear_put_debit_spread",
+    "call_credit_spread_research",
+)
+
+NEUTRAL_OPTION_STRATEGY_TYPES = (
+    "covered_call_research",
+)
+
+
 def _safe_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -378,4 +407,3 @@ def build_option_strategy_candidates(
         "warnings": warnings,
         "errors": errors,
     }
-

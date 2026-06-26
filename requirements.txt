@@ -11,6 +11,7 @@ hmmlearn
 pysr
 shap
 google-generativeai
+openai
 pinecone
 textblob
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 import os
+import re
 import sys
 
 from fastapi import FastAPI
@@ -31,7 +32,15 @@ from journal.trade_journal import (  # noqa: E402
 )
 from jobs.job_history import list_job_runs  # noqa: E402
 from jobs.job_registry import list_registered_jobs  # noqa: E402
-from ideas import build_best_available_ideas, format_best_ideas_response  # noqa: E402
+from ideas import build_assistant_trade_response, build_best_available_ideas, format_best_ideas_response  # noqa: E402
+from learning import (  # noqa: E402
+    create_policy_proposal,
+    evaluate_policy_walk_forward,
+    get_learning_status,
+    grade_mature_candidate_outcomes,
+    list_policies,
+    promote_policy_proposal,
+)
 from memory.annotation_store import add_human_annotation  # noqa: E402
 from options.strategy_builder import build_option_strategy_candidates  # noqa: E402
 from paper.paper_trader import (  # noqa: E402
@@ -39,9 +48,13 @@ from paper.paper_trader import (  # noqa: E402
     review_paper_portfolio,
     run_paper_trade_cycle,
 )
+from planning import execute_adaptive_scan_plan, execute_scan_plan, get_ai_planner_status, propose_scan_plan, validate_scan_plan  # noqa: E402
+from research import build_current_research, get_research_runtime_status  # noqa: E402
 from realtime.market_data import get_market_snapshot  # noqa: E402
 from realtime.options_chain import get_options_chain  # noqa: E402
 from reports.report_generator import generate_performance_diagnostics_report  # noqa: E402
+from scanner.options_discovery import discover_option_ideas  # noqa: E402
+from scanner.universe_builder import validate_ticker_universe  # noqa: E402
 from simulation.scenario_definitions import list_stress_scenarios  # noqa: E402
 from simulation.scenario_runner import run_default_stress_suite  # noqa: E402
 from tools.agent_tools import generate_report_tool  # noqa: E402
@@ -179,6 +192,15 @@ class OptionsStrategiesRequest(BaseModel):
     include_live_chain: bool = True
 
 
+class OptionsDiscoverRequest(BaseModel):
+    tickers: list[str] = Field(default_factory=list)
+    option_preferences: dict = Field(default_factory=dict)
+    runtime_context: dict = Field(default_factory=dict)
+    stock_candidates: list[dict] = Field(default_factory=list)
+    max_underlyings: int = 5
+    max_contracts_per_ticker: int = 3
+
+
 class AnnotationRequest(BaseModel):
     db_path: str = "strategy_library.db"
     entity_type: str = "trade"
@@ -192,8 +214,76 @@ class AnnotationRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class PlanningValidateRequest(BaseModel):
+    plan: dict = Field(default_factory=dict)
+    runtime_context: dict = Field(default_factory=dict)
+
+
+class PlanningProposeRequest(BaseModel):
+    message: str
+    runtime_context: dict = Field(default_factory=dict)
+    user_preferences: dict = Field(default_factory=dict)
+    request_id: str | None = None
+    provider: str | None = None
+
+
+class PlanningExecuteRequest(BaseModel):
+    plan: dict = Field(default_factory=dict)
+    runtime_context: dict = Field(default_factory=dict)
+    db_path: str = "strategy_library.db"
+
+
+class PlanningExecuteAdaptiveRequest(BaseModel):
+    plan: dict = Field(default_factory=dict)
+    runtime_context: dict = Field(default_factory=dict)
+    message: str | None = None
+    provider: str | None = "auto"
+    db_path: str = "strategy_library.db"
+
+
+class CurrentResearchRequest(BaseModel):
+    tickers: list[str] = Field(default_factory=list)
+    scopes: list[str] | None = None
+    provider: str | None = None
+    request_id: str | None = None
+    as_of: str | None = None
+
+
+class LearningGradeOutcomesRequest(BaseModel):
+    db_path: str = "strategy_library.db"
+    as_of: str | None = None
+    horizons: list[int] | None = None
+
+
+class LearningEvaluatePolicyRequest(BaseModel):
+    candidate_policy: dict = Field(default_factory=dict)
+    baseline_policy_version: str | None = None
+    config: dict = Field(default_factory=dict)
+    db_path: str = "strategy_library.db"
+
+
+class LearningProposalRequest(BaseModel):
+    proposed_policy: dict = Field(default_factory=dict)
+    baseline_policy_version: str | None = None
+    created_by: str = "user"
+    db_path: str = "strategy_library.db"
+
+
+class LearningPromoteRequest(BaseModel):
+    proposal_id: int
+    approved_by: str
+    approval_reason: str
+    expected_current_policy_version: str
+    confirm: bool = False
+    db_path: str = "strategy_library.db"
+
+
 def _error_response(message: str, status_code: int = 500) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"ok": False, "error": message})
+
+
+def _as_dict(value):
+    return value if isinstance(value, dict) else {}
 
 
 def _extract_error(result: dict, fallback: str) -> str:
@@ -220,6 +310,50 @@ def _is_gemini_dead_end(answer: str) -> bool:
         or "gemini runtime is not fully configured" in normalized
         or "error occurred while contacting the ai" in normalized
     )
+
+
+_CHAT_TICKER_EXCLUSIONS = {
+    "AI",
+    "API",
+    "BEST",
+    "BUY",
+    "CALL",
+    "CALLS",
+    "DO",
+    "FIND",
+    "GIVE",
+    "IBKR",
+    "NO",
+    "NOT",
+    "OPTION",
+    "OPTIONS",
+    "PAPER",
+    "PLAN",
+    "PUT",
+    "PUTS",
+    "REVIEW",
+    "SCAN",
+    "SELL",
+    "SHOW",
+    "STOCK",
+    "STOCKS",
+    "SYSTEM",
+    "TOP",
+    "TRADE",
+    "TRADES",
+    "TWS",
+    "WATCH",
+    "WHAT",
+    "WHY",
+}
+
+
+def _has_explicit_ticker_review(message: str) -> bool:
+    normalized = str(message or "").lower()
+    if not any(term in normalized for term in ("review", "analyze", "analyse", "check", "look at")):
+        return False
+    tickers = re.findall(r"(?<![A-Za-z])\$?([A-Z]{1,5}(?:[.-][A-Z])?)(?![A-Za-z])", str(message or ""))
+    return any(ticker.upper() not in _CHAT_TICKER_EXCLUSIONS for ticker in tickers)
 
 
 def _is_trade_question(message: str) -> bool:
@@ -257,7 +391,7 @@ def _is_trade_question(message: str) -> bool:
         "opportunity",
         "weekly",
     )
-    return any(term in normalized_compact for term in terms)
+    return any(term in normalized_compact for term in terms) or _has_explicit_ticker_review(message)
 
 
 def _is_stock_only_request(message: str) -> bool:
@@ -292,6 +426,35 @@ def _wants_options_request(message: str) -> bool:
         return False
     option_terms = ("option", "options", "calls", "puts", "spread", "spreads")
     return any(term in normalized for term in option_terms)
+
+
+def _is_system_question(message: str) -> bool:
+    normalized = str(message or "").lower().replace("-", " ")
+    terms = (
+        "system status",
+        "status",
+        "readiness",
+        "diagnostic",
+        "diagnostics",
+        "what is broken",
+        "what's broken",
+        "provider status",
+        "api key",
+        "api keys",
+    )
+    return any(term in normalized for term in terms)
+
+
+def _is_performance_question(message: str) -> bool:
+    normalized = str(message or "").lower()
+    terms = ("performance", "win rate", "expectancy", "strategy performance")
+    return any(term in normalized for term in terms)
+
+
+def _is_open_trades_question(message: str) -> bool:
+    normalized = str(message or "").lower()
+    terms = ("open trade", "open trades", "current paper trades", "paper portfolio")
+    return any(term in normalized for term in terms)
 
 
 def _sanitize_runtime_reason(reason: str | None) -> str | None:
@@ -356,13 +519,74 @@ def _deterministic_chat_fallback(message: str, reason: str | None = None) -> dic
     }
 
 
-def _enrich_with_best_ideas(result: dict, include_options: bool = True) -> dict:
+def _requested_instrument_from_message(message: str) -> str:
+    if _is_stock_only_request(message):
+        return "stocks"
+    if _wants_options_request(message):
+        return "options"
+    return "auto"
+
+
+def _requested_instrument_from_options(include_options: bool) -> str:
+    return "both" if include_options else "stocks"
+
+
+def _safe_max_passes(plan: dict) -> int:
+    try:
+        return int((plan.get("refinement") or {}).get("max_passes") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _broad_trade_idea_plan(plan: dict) -> bool:
+    objective = str(plan.get("objective") or "best_ideas").lower()
+    return objective in {"best_ideas", "watchlist", "options_research"} and not bool(plan.get("custom_tickers"))
+
+
+def _prepare_chat_execution_plan(message: str, approved_plan: dict) -> dict:
+    plan = dict(approved_plan or {})
+    if _broad_trade_idea_plan(plan):
+        refinement = dict(plan.get("refinement") or {})
+        refinement["max_passes"] = max(2, _safe_max_passes(plan))
+        plan["refinement"] = refinement
+    if _is_stock_only_request(message):
+        plan["requested_instrument"] = "stocks"
+        plan["include_options"] = False
+        plan["prefer_options"] = False
+    return plan
+
+
+def _should_use_adaptive_chat_execution(plan: dict) -> bool:
+    return _broad_trade_idea_plan(plan) and _safe_max_passes(plan) > 1
+
+
+def _include_options_from_execution_result(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+    config = _as_dict(result.get("execution_config"))
+    if config:
+        return bool(config.get("include_options"))
+    initial_validation = _as_dict(result.get("initial_policy_validation"))
+    initial_config = _as_dict(initial_validation.get("execution_config"))
+    if initial_config:
+        return bool(initial_config.get("include_options"))
+    approved = _as_dict(result.get("approved_plan") or initial_validation.get("approved_plan"))
+    return bool(approved.get("include_options"))
+
+
+def _enrich_with_best_ideas(result: dict, include_options: bool = True, requested_instrument: str | None = None) -> dict:
     if not isinstance(result, dict):
         return result
     enriched = dict(result)
     best_ideas = build_best_available_ideas(enriched, config={"include_options": include_options})
+    assistant_response = build_assistant_trade_response(
+        best_ideas,
+        trading_result=enriched,
+        requested_instrument=requested_instrument or _requested_instrument_from_options(include_options),
+    )
     enriched["best_available_ideas"] = best_ideas
-    enriched["formatted_best_ideas_summary"] = format_best_ideas_response(best_ideas)
+    enriched["assistant_response"] = assistant_response
+    enriched["formatted_best_ideas_summary"] = format_best_ideas_response(assistant_response)
     return enriched
 
 
@@ -387,44 +611,153 @@ def _run_paper_cycle_payload(request: PaperCycleRequest) -> dict:
         risk_mode=request.risk_mode,
         db_path=request.db_path,
     )
-    return _enrich_with_best_ideas(result, include_options=request.include_options)
+    return _enrich_with_best_ideas(
+        result,
+        include_options=request.include_options,
+        requested_instrument=_requested_instrument_from_options(request.include_options),
+    )
 
 
 def _run_best_ideas_chat_scan(message: str, db_path: str) -> dict:
-    wants_options = _wants_options_request(message)
-    request = PaperCycleRequest(
-        universe="mega_cap",
-        max_tickers=25,
-        max_trades=2,
-        min_trades=0,
-        include_options=wants_options,
-        prefer_options=False,
-        include_market_regime=True,
-        include_relative_strength=True,
-        include_portfolio_risk=True,
-        include_position_sizing=True,
-        db_path=db_path,
+    user_preferences = {
+        "requested_instrument": _requested_instrument_from_message(message),
+        "include_options": _wants_options_request(message),
+        "prefer_options": _wants_options_request(message),
+    }
+    if user_preferences["requested_instrument"] == "auto":
+        user_preferences["requested_instrument"] = "options" if _wants_options_request(message) else "stocks"
+    if _is_stock_only_request(message):
+        user_preferences["requested_instrument"] = "stocks"
+        user_preferences["include_options"] = False
+        user_preferences["prefer_options"] = False
+
+    planner_result = propose_scan_plan(
+        message,
+        runtime_context={},
+        user_preferences=user_preferences,
     )
-    scan_result = _run_paper_cycle_payload(request)
-    best_ideas = scan_result.get("best_available_ideas") if isinstance(scan_result, dict) else None
-    if not isinstance(best_ideas, dict):
-        best_ideas = build_best_available_ideas(scan_result if isinstance(scan_result, dict) else {})
+    approved_plan = planner_result.get("approved_plan", {}) if isinstance(planner_result, dict) else {}
+    execution_plan = _prepare_chat_execution_plan(message, approved_plan)
+    use_adaptive = _should_use_adaptive_chat_execution(execution_plan)
+    execution_result = (
+        execute_adaptive_scan_plan(execution_plan, runtime_context={}, db_path=db_path, message=message)
+        if use_adaptive
+        else execute_scan_plan(execution_plan, runtime_context={}, db_path=db_path)
+    )
+    best_ideas = execution_result.get("best_available_ideas") if isinstance(execution_result, dict) else {}
+    assistant_response = execution_result.get("assistant_response") if isinstance(execution_result, dict) else {}
+    trading_result = (
+        execution_result.get("consolidated_result", {})
+        if use_adaptive and isinstance(execution_result, dict)
+        else execution_result.get("trading_result", {}) if isinstance(execution_result, dict) else {}
+    )
     return {
-        "scan_result": scan_result,
+        "planner": planner_result,
+        "scan_result": execution_result,
+        "trading_result": trading_result,
         "best_available_ideas": best_ideas,
-        "formatted_best_ideas_summary": format_best_ideas_response(best_ideas),
-        "include_options": wants_options,
+        "assistant_response": assistant_response,
+        "formatted_best_ideas_summary": execution_result.get("formatted_response") or format_best_ideas_response(assistant_response),
+        "include_options": _include_options_from_execution_result(execution_result),
+        "policy_validation": (
+            execution_result.get("initial_policy_validation", {})
+            if use_adaptive and isinstance(execution_result, dict)
+            else execution_result.get("policy_validation", {}) if isinstance(execution_result, dict) else {}
+        ),
+        "approved_plan": (
+            _as_dict(_as_dict(execution_result.get("initial_policy_validation")).get("approved_plan"))
+            if use_adaptive and isinstance(execution_result, dict)
+            else execution_result.get("approved_plan", {}) if isinstance(execution_result, dict) else {}
+        ),
+        "execution_summary": (
+            {
+                "status": execution_result.get("status"),
+                "adaptive_execution_version": execution_result.get("adaptive_execution_version"),
+                "passes_executed": execution_result.get("passes_executed"),
+                "stop_reason": execution_result.get("stop_reason"),
+                "refinement_used": execution_result.get("refinement_used"),
+            }
+            if use_adaptive and isinstance(execution_result, dict)
+            else execution_result.get("execution_summary", {}) if isinstance(execution_result, dict) else {}
+        ),
+        "adaptive_execution": execution_result if use_adaptive and isinstance(execution_result, dict) else None,
+        "refinement_used": bool(execution_result.get("refinement_used")) if use_adaptive and isinstance(execution_result, dict) else False,
+        "passes_executed": int(execution_result.get("passes_executed") or 1) if use_adaptive and isinstance(execution_result, dict) else 1,
+        "refinement_stop_reason": str(execution_result.get("stop_reason") or "") if use_adaptive and isinstance(execution_result, dict) else "",
     }
 
 
 def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
     init_error = get_model_init_error()
+    if _is_system_question(message):
+        status_payload = _status_payload(db_path=db_path)
+        return {
+            "ok": True,
+            "mode": "deterministic_status",
+            "answer": "System status is available from the deterministic backend. No market scan was run.",
+            "gemini_available": init_error is None,
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "status_payload": status_payload,
+            "validation": {
+                "validation_status": "source_of_truth_status",
+                "safe_to_show_user": True,
+                "deterministic_engine_source_of_truth": True,
+                "deterministic_fallback_used": init_error is not None,
+            },
+            "raw_result": {"message": message, "status": status_payload},
+            "warnings": list(status_payload.get("warnings", [])),
+            "errors": list(status_payload.get("errors", [])),
+        }
+    if _is_performance_question(message):
+        performance_payload = _performance_payload(db_path=db_path)
+        return {
+            "ok": True,
+            "mode": "deterministic_performance",
+            "answer": "Performance data is loaded from SQLite source-of-truth records. No market scan was run.",
+            "gemini_available": init_error is None,
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "performance": performance_payload,
+            "validation": {
+                "validation_status": "source_of_truth_performance",
+                "safe_to_show_user": True,
+                "deterministic_engine_source_of_truth": True,
+                "deterministic_fallback_used": init_error is not None,
+            },
+            "raw_result": {"message": message, "performance": performance_payload},
+            "warnings": [],
+            "errors": list(performance_payload.get("errors", [])),
+        }
+    if _is_open_trades_question(message):
+        open_trades = get_open_recommendations(db_path=db_path)
+        return {
+            "ok": True,
+            "mode": "deterministic_open_trades",
+            "answer": "Open trades are loaded from SQLite source-of-truth records. No market scan was run.",
+            "gemini_available": init_error is None,
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "open_recommendations": open_trades,
+            "validation": {
+                "validation_status": "source_of_truth_open_trades",
+                "safe_to_show_user": True,
+                "deterministic_engine_source_of_truth": True,
+                "deterministic_fallback_used": init_error is not None,
+            },
+            "raw_result": {"message": message, "open_recommendations": open_trades},
+            "warnings": [],
+            "errors": [],
+        }
     if _is_trade_question(message):
         best_ideas_payload = _run_best_ideas_chat_scan(message, db_path=db_path)
+        planner_result = best_ideas_payload.get("planner", {})
         best_ideas = best_ideas_payload["best_available_ideas"]
+        assistant_response = best_ideas_payload["assistant_response"]
         answer = best_ideas_payload["formatted_best_ideas_summary"]
-        mode = "deterministic_fallback" if init_error else "deterministic_scan"
-        warnings = list(best_ideas.get("warnings", []))
+        planner_status = str(planner_result.get("status") or "")
+        mode = "ai_planned_scan" if planner_status == "ai_planned" else "deterministic_fallback" if init_error else "deterministic_scan"
+        warnings = list(best_ideas.get("warnings", [])) + list(planner_result.get("warnings", []))
         if init_error:
             warnings.append("Gemini is unavailable; deterministic scan and formatter were used.")
         else:
@@ -437,21 +770,43 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
             "paper_trading_only": True,
             "brokerage_execution_enabled": False,
             "best_available_ideas": best_ideas,
+            "assistant_response": assistant_response,
             "scan_result": best_ideas_payload["scan_result"],
+            "trading_result": best_ideas_payload["trading_result"],
             "formatted_best_ideas_summary": answer,
+            "planner": planner_result,
+            "planner_provider": planner_result.get("provider"),
+            "planner_status": planner_result.get("status"),
+            "planner_fallback_used": bool(planner_result.get("fallback_used")),
+            "policy_validation": best_ideas_payload["policy_validation"],
+            "approved_plan": best_ideas_payload["approved_plan"],
+            "execution_summary": best_ideas_payload["execution_summary"],
+            "adaptive_execution": best_ideas_payload.get("adaptive_execution"),
+            "refinement_used": bool(best_ideas_payload.get("refinement_used")),
+            "passes_executed": int(best_ideas_payload.get("passes_executed") or 1),
+            "refinement_stop_reason": best_ideas_payload.get("refinement_stop_reason") or "",
             "validation": {
                 "validation_status": mode,
                 "safe_to_show_user": True,
                 "deterministic_engine_source_of_truth": True,
                 "deterministic_fallback_used": init_error is not None,
+                "planner_fallback_used": bool(planner_result.get("fallback_used")),
+                "adaptive_execution_used": bool(best_ideas_payload.get("adaptive_execution")),
             },
             "raw_result": {
                 "message": message,
                 "gemini_status": "available" if init_error is None else "unavailable",
                 "include_options": best_ideas_payload["include_options"],
+                "planner_status": planner_result.get("status"),
+                "planner_provider": planner_result.get("provider"),
+                "approved_plan": best_ideas_payload["approved_plan"],
+                "execution_summary": best_ideas_payload["execution_summary"],
+                "refinement_used": bool(best_ideas_payload.get("refinement_used")),
+                "passes_executed": int(best_ideas_payload.get("passes_executed") or 1),
+                "refinement_stop_reason": best_ideas_payload.get("refinement_stop_reason") or "",
             },
-            "warnings": warnings,
-            "errors": [],
+            "warnings": list(dict.fromkeys(str(item) for item in warnings if item)),
+            "errors": list(planner_result.get("errors", [])),
         }
 
     answer = ask_translator(message)
@@ -489,6 +844,9 @@ def _status_payload(db_path: str = "strategy_library.db") -> dict:
         "win_loss_record": get_win_loss_record(db_path=db_path),
         "strategy_performance": get_strategy_performance(db_path=db_path),
     }
+    planner_status = get_ai_planner_status()
+    research_status = get_research_runtime_status()
+    learning_status = get_learning_status(db_path=db_path)
     return {
         "ok": True,
         "backend": "running",
@@ -497,12 +855,15 @@ def _status_payload(db_path: str = "strategy_library.db") -> dict:
         "brokerage_execution_enabled": False,
         "gemini_available": gemini_error is None,
         "gemini_status": "available" if gemini_error is None else "unavailable",
+        **planner_status,
+        **research_status,
         "ibkr_configured": bool(os.getenv("IBKR_HOST") and os.getenv("IBKR_PORT")),
         "database_ready": bool(validation.get("ok")),
         "frontend_bridge": "ready",
         "readiness": readiness,
         "paper_summary": paper,
         "performance": performance,
+        "learning": learning_status,
         "alerts": alerts,
         "warnings": list(readiness.get("warnings", [])) if isinstance(readiness, dict) else [],
         "errors": [],
@@ -604,6 +965,29 @@ def _options_strategies_payload(request: OptionsStrategiesRequest) -> dict:
         "warnings": warnings,
         "errors": list(strategies.get("errors", [])),
     }
+
+
+def _options_discover_payload(request: OptionsDiscoverRequest) -> dict:
+    validation = validate_ticker_universe(request.tickers, max_tickers=max(1, request.max_underlyings))
+    if not validation.get("ok"):
+        return {
+            "ok": False,
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "error": "; ".join(validation.get("errors", [])) or "No valid option tickers were provided.",
+            "errors": validation.get("errors", []),
+        }
+    result = discover_option_ideas(
+        request.stock_candidates,
+        explicit_tickers=validation.get("tickers", []),
+        option_preferences=request.option_preferences,
+        runtime_context={**request.runtime_context, "requested": True},
+        max_underlyings=request.max_underlyings,
+        max_contracts_per_ticker=request.max_contracts_per_ticker,
+    )
+    result["validated_tickers"] = validation.get("tickers", [])
+    result["route"] = "/api/options/discover"
+    return result
 
 
 @app.get("/")
@@ -711,6 +1095,116 @@ async def api_stress_suite():
     return await run_blocking_backend_call(run_default_stress_suite)
 
 
+@app.post("/api/planning/validate")
+async def api_planning_validate(request: PlanningValidateRequest):
+    return await run_blocking_backend_call(
+        validate_scan_plan,
+        request.plan,
+        runtime_context=request.runtime_context,
+    )
+
+
+@app.post("/api/planning/propose")
+async def api_planning_propose(request: PlanningProposeRequest):
+    return await run_blocking_backend_call(
+        propose_scan_plan,
+        request.message,
+        runtime_context=request.runtime_context,
+        user_preferences=request.user_preferences,
+        request_id=request.request_id,
+        provider=request.provider,
+    )
+
+
+@app.post("/api/planning/execute")
+async def api_planning_execute(request: PlanningExecuteRequest):
+    return await run_blocking_backend_call(
+        execute_scan_plan,
+        request.plan,
+        runtime_context=request.runtime_context,
+        db_path=request.db_path,
+    )
+
+
+@app.post("/api/planning/execute-adaptive")
+async def api_planning_execute_adaptive(request: PlanningExecuteAdaptiveRequest):
+    return await run_blocking_backend_call(
+        execute_adaptive_scan_plan,
+        request.plan,
+        runtime_context=request.runtime_context,
+        db_path=request.db_path,
+        message=request.message,
+        provider=request.provider,
+    )
+
+
+@app.post("/api/research/current")
+async def api_research_current(request: CurrentResearchRequest):
+    return await run_blocking_backend_call(
+        build_current_research,
+        request.tickers,
+        scopes=request.scopes,
+        request_id=request.request_id,
+        as_of=request.as_of,
+        provider=request.provider,
+    )
+
+
+@app.get("/api/learning/status")
+async def api_learning_status(db_path: str = "strategy_library.db"):
+    return await run_blocking_backend_call(get_learning_status, db_path=db_path)
+
+
+@app.post("/api/learning/grade-outcomes")
+async def api_learning_grade_outcomes(request: LearningGradeOutcomesRequest):
+    return await run_blocking_backend_call(
+        grade_mature_candidate_outcomes,
+        db_path=request.db_path,
+        as_of=request.as_of,
+        horizons=request.horizons,
+    )
+
+
+@app.post("/api/learning/evaluate-policy")
+async def api_learning_evaluate_policy(request: LearningEvaluatePolicyRequest):
+    return await run_blocking_backend_call(
+        evaluate_policy_walk_forward,
+        request.candidate_policy,
+        baseline_policy_version=request.baseline_policy_version,
+        db_path=request.db_path,
+        config=request.config,
+    )
+
+
+@app.post("/api/learning/proposals")
+async def api_learning_proposals(request: LearningProposalRequest):
+    return await run_blocking_backend_call(
+        create_policy_proposal,
+        request.proposed_policy,
+        baseline_policy_version=request.baseline_policy_version,
+        created_by=request.created_by,
+        db_path=request.db_path,
+    )
+
+
+@app.post("/api/learning/promote")
+async def api_learning_promote(request: LearningPromoteRequest):
+    return await run_blocking_backend_call(
+        promote_policy_proposal,
+        proposal_id=request.proposal_id,
+        approved_by=request.approved_by,
+        approval_reason=request.approval_reason,
+        expected_current_policy_version=request.expected_current_policy_version,
+        confirm=request.confirm,
+        db_path=request.db_path,
+    )
+
+
+@app.get("/api/learning/policies")
+async def api_learning_policies(db_path: str = "strategy_library.db"):
+    return await run_blocking_backend_call(list_policies, db_path=db_path, include_policy_json=True)
+
+
 @app.get("/diagnostics/environment")
 async def diagnostics_environment(db_path: str = "strategy_library.db"):
     return await run_blocking_backend_call(check_environment, db_path=db_path)
@@ -766,6 +1260,11 @@ async def api_scan(request: PaperCycleRequest):
 @app.post("/api/options/strategies")
 async def api_options_strategies(request: OptionsStrategiesRequest):
     return await run_blocking_backend_call(_options_strategies_payload, request)
+
+
+@app.post("/api/options/discover")
+async def api_options_discover(request: OptionsDiscoverRequest):
+    return await run_blocking_backend_call(_options_discover_payload, request)
 
 
 @app.post("/api/annotations")

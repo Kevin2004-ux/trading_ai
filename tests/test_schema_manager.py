@@ -23,6 +23,13 @@ def test_schema_migrations_apply_cleanly_to_empty_db(tmp_path):
     assert validation["tables"]["pipeline_runs"] is True
     assert validation["tables"]["scheduled_job_runs"] is True
     assert validation["tables"]["alert_events"] is True
+    assert validation["tables"]["research_execution_records"] is True
+    assert validation["tables"]["candidate_snapshots"] is True
+    assert validation["tables"]["candidate_forward_outcomes"] is True
+    assert validation["tables"]["research_policies"] is True
+    assert validation["tables"]["policy_evaluations"] is True
+    assert validation["tables"]["policy_proposals"] is True
+    assert validation["tables"]["shadow_policy_scores"] is True
 
 
 def test_schema_migrations_are_idempotent(tmp_path):

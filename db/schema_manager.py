@@ -20,6 +20,13 @@ REQUIRED_TABLES = {
     "memory_retrieval_events",
     "scheduled_job_runs",
     "alert_events",
+    "research_execution_records",
+    "candidate_snapshots",
+    "candidate_forward_outcomes",
+    "research_policies",
+    "policy_evaluations",
+    "policy_proposals",
+    "shadow_policy_scores",
 }
 
 

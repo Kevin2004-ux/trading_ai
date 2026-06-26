@@ -40,7 +40,7 @@ from scanner.swing_scanner import (
     calculate_trade_levels,
     scan_multi_strategy_candidates,
 )
-from scanner.universe_builder import get_default_universe
+from scanner.universe_builder import get_default_universe, validate_ticker_universe
 from selector.weekly_selector import select_weekly_trades
 from tracking.outcome_grader import update_open_recommendations
 from tracking.trade_logger import (
@@ -1389,10 +1389,21 @@ def run_weekly_trade_hunt(
     scan_ticker_timeout_seconds: float = 15.0,
     scan_total_timeout_seconds: float = 180.0,
     use_async_scan: bool = True,
+    tickers: list[str] | None = None,
+    universe_result_override: dict | None = None,
+    max_total_candidates: int | None = None,
+    scanner_config: dict | None = None,
 ) -> dict:
     errors: list[str] = []
     concentration_summary = None
-    universe_result = get_default_universe(universe=universe, max_tickers=max_tickers)
+    if isinstance(universe_result_override, dict):
+        universe_result = deepcopy(universe_result_override)
+    elif tickers is not None:
+        universe_result = validate_ticker_universe(tickers, max_tickers=max_tickers)
+        universe_result["universe"] = universe
+        universe_result["source"] = "explicit_tickers"
+    else:
+        universe_result = get_default_universe(universe=universe, max_tickers=max_tickers)
     if not universe_result.get("ok"):
         return {
             "ok": False,
@@ -1415,17 +1426,22 @@ def run_weekly_trade_hunt(
             "errors": universe_result.get("errors", []) if isinstance(universe_result.get("errors"), list) else [universe_result.get("error", "Universe build failed.")],
         }
 
+    effective_scan_config = {
+        "max_concurrency": scan_max_concurrency,
+        "ticker_timeout_seconds": scan_ticker_timeout_seconds,
+        "total_timeout_seconds": scan_total_timeout_seconds,
+    }
+    if isinstance(scanner_config, dict):
+        effective_scan_config.update(scanner_config)
+
     scan_result = scan_multi_strategy_candidates(
         tickers=universe_result.get("tickers", []),
         profiles=profiles,
         universe=universe,
         db_path=db_path,
+        max_total_candidates=max_total_candidates if max_total_candidates is not None else 25,
         use_async_scan=use_async_scan,
-        scan_config={
-            "max_concurrency": scan_max_concurrency,
-            "ticker_timeout_seconds": scan_ticker_timeout_seconds,
-            "total_timeout_seconds": scan_total_timeout_seconds,
-        },
+        scan_config=effective_scan_config,
     )
     if not scan_result.get("ok"):
         return {

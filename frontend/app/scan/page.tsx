@@ -1,13 +1,13 @@
 "use client";
 
-import { useState } from "react";
-import { apiPost, asList, asRecord, pickNested } from "@/lib/api";
-import { fmt, fmtPrice } from "@/lib/format";
+import { useMemo, useState } from "react";
+import { apiPost, ApiResult } from "@/lib/api";
+import { normalizeChatResponse } from "@/lib/tradingTypes";
 import { Badge } from "@/components/Badge";
 import { Card } from "@/components/Card";
-import { JsonPanel } from "@/components/JsonPanel";
 import { PageHeader } from "@/components/PageHeader";
 import { WarningBox } from "@/components/WarningBox";
+import { AssistantResultPanel } from "@/components/ideas/AssistantResultPanel";
 
 export default function ScanPage() {
   const [form, setForm] = useState({
@@ -20,7 +20,7 @@ export default function ScanPage() {
     include_portfolio_risk: true,
     include_position_sizing: true
   });
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [result, setResult] = useState<ApiResult | null>(null);
   const [loading, setLoading] = useState(false);
 
   function update(key: string, value: unknown) {
@@ -29,43 +29,41 @@ export default function ScanPage() {
 
   async function runScan() {
     setLoading(true);
-    setResult(await apiPost("/api/scan", { ...form, min_trades: 0, prefer_options: false }));
+    setResult(await apiPost("/api/scan", { ...form, min_trades: 0, prefer_options: false }, { timeoutMs: 120000 }));
     setLoading(false);
   }
 
-  const summary = asRecord(result?.summary);
-  const decision = asRecord(result?.decision_result);
-  const selection = asRecord(result?.selection_result);
-  const scanResult = asRecord(result?.scan_result);
-  const bestIdeas = asRecord(result?.best_available_ideas);
-  const finalTrades = asList(bestIdeas.paper_eligible).length ? asList(bestIdeas.paper_eligible) : asList(decision.final_recommendations ?? result?.paper_trades_logged);
-  const watchlist = asList(bestIdeas.stock_watchlist).length ? asList(bestIdeas.stock_watchlist) : asList(selection.watchlist_alternatives);
-  const optionResearch = asList(bestIdeas.option_research_only);
-  const blockedInteresting = asList(bestIdeas.blocked_but_interesting).length ? asList(bestIdeas.blocked_but_interesting) : asList(selection.rejected_candidates).concat(asList(decision.risk_rejected), asList(decision.not_selected));
-  const whyNoFinal = Array.isArray(bestIdeas.why_no_final_trades) ? (bestIdeas.why_no_final_trades as string[]) : [];
-  const dataMissing = Array.isArray(bestIdeas.data_missing) ? (bestIdeas.data_missing as string[]) : [];
-  const systemIssues = Array.isArray(bestIdeas.system_issues) ? (bestIdeas.system_issues as string[]) : [];
-  const warnings = [
-    ...((Array.isArray(result?.warnings) ? result?.warnings : []) as string[]),
-    ...((Array.isArray(pickNested(scanResult, "data_quality_summary.warnings")) ? pickNested(scanResult, "data_quality_summary.warnings") : []) as string[])
-  ];
+  const normalized = useMemo(() => {
+    if (!result) return null;
+    return normalizeChatResponse({
+      ...result,
+      answer: result.formatted_best_ideas_summary,
+      mode: "scan_page"
+    });
+  }, [result]);
 
   return (
     <div>
-      <PageHeader eyebrow="Run scan" title="Best paper picks" description="Runs the backend paper-cycle path. It can log simulated paper trades, but it never places brokerage orders." />
+      <PageHeader
+        eyebrow="Advanced scan"
+        title="Run a deterministic scan"
+        description="Manual paper-cycle controls for explicit backend scans. Chat and Ideas are the primary experience; this page keeps engineering controls available."
+      />
+      <WarningBox items={["The frontend never sends auto_log=true.", "Options remain research-only or blocked unless backend quote, IV, Greeks, liquidity, spread, and fill-quality gates pass."]} />
+
       <section className="grid gap-4 rounded-3xl bg-white/75 p-5 shadow-card md:grid-cols-3">
         <label className="text-sm font-bold">Universe
-          <select className="mt-2 w-full rounded-xl border p-3" value={form.universe} onChange={(e) => update("universe", e.target.value)}>
+          <select className="mt-2 w-full rounded-xl border p-3 focus:outline-none focus:ring-2 focus:ring-tide" value={form.universe} onChange={(e) => update("universe", e.target.value)}>
             <option value="mega_cap">mega_cap</option>
             <option value="large_cap">large_cap</option>
             <option value="custom">custom</option>
           </select>
         </label>
         <label className="text-sm font-bold">Max tickers
-          <input className="mt-2 w-full rounded-xl border p-3" type="number" value={form.max_tickers} onChange={(e) => update("max_tickers", Number(e.target.value))} />
+          <input className="mt-2 w-full rounded-xl border p-3 focus:outline-none focus:ring-2 focus:ring-tide" type="number" value={form.max_tickers} onChange={(e) => update("max_tickers", Number(e.target.value))} />
         </label>
-        <label className="text-sm font-bold">Max trades
-          <input className="mt-2 w-full rounded-xl border p-3" type="number" value={form.max_trades} onChange={(e) => update("max_trades", Number(e.target.value))} />
+        <label className="text-sm font-bold">Max paper trades
+          <input className="mt-2 w-full rounded-xl border p-3 focus:outline-none focus:ring-2 focus:ring-tide" type="number" value={form.max_trades} onChange={(e) => update("max_trades", Number(e.target.value))} />
         </label>
         {[
           ["include_options", "Include options research"],
@@ -79,74 +77,24 @@ export default function ScanPage() {
             {label}
           </label>
         ))}
-        <button className="rounded-2xl bg-ink px-5 py-3 font-black text-white disabled:opacity-50 md:col-span-3" disabled={loading} onClick={runScan} type="button">
-          {loading ? "Running deterministic scan..." : "Run paper scan"}
+        <button className="rounded-2xl bg-ink px-5 py-3 font-black text-white disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-tide md:col-span-3" disabled={loading} onClick={runScan} type="button">
+          {loading ? "Running scan..." : "Run fresh scan"}
         </button>
       </section>
 
-      {result ? (
+      {normalized ? (
         <>
           <section className="mt-6 grid gap-4 md:grid-cols-4">
-            <Card title="Selected" value={fmt(summary.selected_count, String(finalTrades.length))} />
-            <Card title="Logged" value={fmt(summary.logged_count, "0")} />
-            <Card title="Failed tickers" value={fmt(pickNested(scanResult, "scan_execution_summary.failed_tickers.length"), "0")} />
-            <Card title="Options" value={<Badge>{form.include_options ? "Research gated" : "Stock only"}</Badge>} />
+            <Card title="Ranking" value={<Badge>{normalized.assistant.ranking_status}</Badge>} />
+            <Card title="Paper eligible" value={normalized.assistant.paper_eligible.length} />
+            <Card title="Stocks" value={normalized.assistant.top_stocks.length} />
+            <Card title="Options" value={normalized.assistant.top_options.length + normalized.assistant.option_underlying_watchlist.length} />
           </section>
-          <div className="mt-6">
-            <WarningBox title="Scan warnings and blocks" items={warnings.concat(finalTrades.length ? [] : ["No final paper trades were selected."])} />
-          </div>
-          {result.formatted_best_ideas_summary ? (
-            <section className="mt-6 rounded-3xl bg-white/75 p-5 shadow-card">
-              <h2 className="text-2xl font-black">Best available ideas summary</h2>
-              <div className="mt-3 whitespace-pre-wrap rounded-2xl bg-stone-50 p-4 text-sm leading-7">{String(result.formatted_best_ideas_summary)}</div>
-            </section>
-          ) : null}
-          <TradeBucket title="Final paper trades" rows={finalTrades} />
-          <TradeBucket title="Best stock watchlist ideas" rows={watchlist} />
-          <TradeBucket title="Option research-only ideas" rows={optionResearch} />
-          <TradeBucket title="Blocked but interesting" rows={blockedInteresting} />
-          <div className="mt-6 grid gap-4 md:grid-cols-3">
-            <WarningBox title="Why no final trades" items={whyNoFinal} />
-            <WarningBox title="Data missing" items={dataMissing} />
-            <WarningBox title="System issues" items={systemIssues} />
-          </div>
-          <div className="mt-6 grid gap-4 md:grid-cols-2">
-            <Card title="Macro / regime" detail={fmt(JSON.stringify(result.macro_risk ?? result.market_regime ?? {}))} />
-            <Card title="Scan execution" detail={fmt(JSON.stringify(scanResult.scan_execution_summary ?? {}))} />
-          </div>
-          <div className="mt-6"><JsonPanel data={result} /></div>
+          <section className="mt-6">
+            <AssistantResultPanel response={normalized} assistant={normalized.assistant} raw={result} />
+          </section>
         </>
       ) : null}
     </div>
-  );
-}
-
-function TradeBucket({ title, rows }: { title: string; rows: Record<string, unknown>[] }) {
-  return (
-    <section className="mt-6 rounded-3xl bg-white/75 p-5 shadow-card">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-2xl font-black">{title}</h2>
-        <Badge tone={rows.length ? "good" : "neutral"}>{rows.length}</Badge>
-      </div>
-      {rows.length ? (
-        <div className="table-shell">
-          <table className="data-table">
-            <thead><tr><th>Ticker</th><th>Status</th><th>Entry</th><th>Target</th><th>Stop</th><th>Reason</th></tr></thead>
-            <tbody>
-              {rows.map((row, index) => (
-                <tr key={`${row.idea_key ?? row.ticker}-${index}`}>
-                  <td className="font-black">{fmt(row.ticker)}</td>
-                  <td><Badge>{fmt(row.recommendation_status ?? row.status ?? row.outcome ?? "paper")}</Badge></td>
-                  <td>{fmtPrice(row.entry_price)}</td>
-                  <td>{fmtPrice(row.target_price)}</td>
-                  <td>{fmtPrice(row.stop_loss)}</td>
-                  <td>{fmt(row.rejection_reason ?? row.reason ?? row.thesis ?? row.invalidation)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : <p className="text-sm text-stone-600">No rows returned.</p>}
-    </section>
   );
 }

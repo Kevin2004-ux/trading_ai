@@ -10,6 +10,7 @@ from .options_scanner import (
     scan_options_for_stock_candidate,
     scan_options_for_weekly_selection,
 )
+from .options_discovery import discover_option_ideas, empty_option_discovery_response
 from .universe_builder import (
     build_custom_universe,
     get_default_universe,
@@ -24,6 +25,8 @@ __all__ = [
     "get_default_universe",
     "get_scan_profile",
     "rank_candidates",
+    "discover_option_ideas",
+    "empty_option_discovery_response",
     "scan_options_for_stock_candidate",
     "scan_options_for_weekly_selection",
     "scan_multi_strategy_candidates",

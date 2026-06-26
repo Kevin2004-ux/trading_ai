@@ -3,6 +3,11 @@ export const API_BASE_URL =
 
 export type ApiResult = Record<string, unknown>;
 
+export interface ApiRequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 async function parseResponse(response: Response): Promise<ApiResult> {
   const text = await response.text();
   let payload: ApiResult;
@@ -23,35 +28,66 @@ async function parseResponse(response: Response): Promise<ApiResult> {
   return payload;
 }
 
-export async function apiGet(path: string): Promise<ApiResult> {
+function buildUrl(path: string): string {
+  return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, options: ApiRequestOptions = {}): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 60000;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`, { cache: "no-store" });
-    return parseResponse(response);
-  } catch (error) {
-    return {
-      ok: false,
-      error: "Backend unreachable. Confirm FastAPI is running and NEXT_PUBLIC_API_BASE_URL is correct.",
-      error_detail: error instanceof Error ? error.message : String(error),
-      api_base_url: API_BASE_URL
-    };
+    return await fn(controller.signal);
+  } finally {
+    window.clearTimeout(timer);
+    options.signal?.removeEventListener("abort", onAbort);
   }
 }
 
-export async function apiPost(path: string, body: Record<string, unknown> = {}): Promise<ApiResult> {
+function apiError(error: unknown): ApiResult {
+  const isAbort = error instanceof DOMException && error.name === "AbortError";
+  return {
+    ok: false,
+    error: isAbort
+      ? "Backend request timed out or was cancelled."
+      : "Backend unreachable. Confirm FastAPI is running and NEXT_PUBLIC_API_BASE_URL is correct.",
+    error_detail: error instanceof Error ? error.message : String(error),
+    api_base_url: API_BASE_URL
+  };
+}
+
+export async function apiGet<T extends ApiResult = ApiResult>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    return parseResponse(response);
+    const payload = await withTimeout(async (signal) => {
+      const response = await fetch(buildUrl(path), { cache: "no-store", signal });
+      return parseResponse(response);
+    }, options);
+    return payload as T;
   } catch (error) {
-    return {
-      ok: false,
-      error: "Backend unreachable. Confirm FastAPI is running and NEXT_PUBLIC_API_BASE_URL is correct.",
-      error_detail: error instanceof Error ? error.message : String(error),
-      api_base_url: API_BASE_URL
-    };
+    return apiError(error) as T;
+  }
+}
+
+export async function apiPost<T extends ApiResult = ApiResult>(
+  path: string,
+  body: Record<string, unknown> = {},
+  options: ApiRequestOptions = {}
+): Promise<T> {
+  try {
+    const payload = await withTimeout(async (signal) => {
+      const response = await fetch(buildUrl(path), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      return parseResponse(response);
+    }, options);
+    return payload as T;
+  } catch (error) {
+    return apiError(error) as T;
   }
 }
 

@@ -16,6 +16,7 @@ def test_migration_definitions_have_versions_names_and_checksums():
     assert "006_correlation_snapshots" in versions
     assert "007_memory_feedback_tables" in versions
     assert "008_scheduled_jobs_and_alerts" in versions
+    assert "009_research_learning_tables" in versions
     assert all(migration["name"] for migration in MIGRATIONS)
     assert all(migration_checksum(migration["sql"]) for migration in MIGRATIONS)
 
@@ -37,9 +38,16 @@ def test_migration_tables_exist_after_apply(tmp_path):
         "audit_events",
         "pipeline_runs",
         "pipeline_checkpoints",
-            "correlation_snapshots",
-            "human_annotations",
-            "memory_retrieval_events",
-            "scheduled_job_runs",
-            "alert_events",
-        }.issubset(tables)
+        "correlation_snapshots",
+        "human_annotations",
+        "memory_retrieval_events",
+        "scheduled_job_runs",
+        "alert_events",
+        "research_execution_records",
+        "candidate_snapshots",
+        "candidate_forward_outcomes",
+        "research_policies",
+        "policy_evaluations",
+        "policy_proposals",
+        "shadow_policy_scores",
+    }.issubset(tables)
