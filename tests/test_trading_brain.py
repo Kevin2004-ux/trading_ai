@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import time
 
 import pytest
 
@@ -1400,6 +1401,120 @@ def test_trading_brain_includes_market_regime_when_enabled(monkeypatch, tmp_path
     assert result["ok"] is True
     assert result["market_regime"]["regime"] == "neutral_chop"
     assert result["decision_result"]["market_regime"]["regime"] == "neutral_chop"
+
+
+def test_ticker_review_scope_does_not_require_market_breadth(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_regime_ticker_no_breadth.db")
+    init_trade_tracking_db(db_path)
+    captured = {}
+
+    monkeypatch.setattr("agent.trading_brain.get_default_universe", lambda **kwargs: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []})
+    monkeypatch.setattr("agent.trading_brain.scan_multi_strategy_candidates", lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"]})
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda **kwargs: [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(_candidate("AAPL")))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda **kwargs: {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda **kwargs: {"overall": {}})
+
+    def fake_regime(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "regime": "neutral_chop",
+            "summary": "Neutral chop.",
+            "options_aggressiveness": "normal",
+            "max_trades_adjustment": 0,
+            "trade_aggressiveness": "normal",
+            "risk_flags": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr("agent.trading_brain.get_market_regime_snapshot", fake_regime)
+
+    result = run_weekly_trade_hunt(
+        include_market_regime=True,
+        include_portfolio_risk=False,
+        include_relative_strength=False,
+        db_path=db_path,
+    )
+
+    assert result["ok"] is True
+    assert captured["include_breadth"] is False
+    assert result["market_regime"]["regime"] == "neutral_chop"
+
+
+def test_broad_scan_uses_bounded_market_breadth(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_regime_broad_breadth.db")
+    init_trade_tracking_db(db_path)
+    captured = {}
+
+    monkeypatch.setattr("agent.trading_brain.get_default_universe", lambda **kwargs: {"ok": True, "tickers": ["AAPL", "MSFT"], "count": 2, "errors": []})
+    monkeypatch.setattr("agent.trading_brain.scan_multi_strategy_candidates", lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"]})
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda **kwargs: [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(_candidate("AAPL")))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda **kwargs: {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda **kwargs: {"overall": {}})
+
+    def fake_regime(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "regime": "neutral_chop",
+            "summary": "Neutral chop.",
+            "options_aggressiveness": "normal",
+            "max_trades_adjustment": 0,
+            "trade_aggressiveness": "normal",
+            "risk_flags": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr("agent.trading_brain.get_market_regime_snapshot", fake_regime)
+
+    result = run_weekly_trade_hunt(
+        include_market_regime=True,
+        include_portfolio_risk=False,
+        include_relative_strength=False,
+        db_path=db_path,
+    )
+
+    assert result["ok"] is True
+    assert captured["include_breadth"] is True
+    assert captured["breadth_sample_size"] == 5
+
+
+def test_market_regime_timeout_is_warning_not_ranking_unavailable(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "brain_regime_timeout.db")
+    init_trade_tracking_db(db_path)
+    monkeypatch.setenv("MARKET_REGIME_TIMEOUT_SECONDS", "0.01")
+
+    monkeypatch.setattr("agent.trading_brain.get_default_universe", lambda **kwargs: {"ok": True, "tickers": ["AAPL"], "count": 1, "errors": []})
+    monkeypatch.setattr("agent.trading_brain.scan_multi_strategy_candidates", lambda **kwargs: {"ok": True, "profiles_run": ["momentum_breakout"]})
+    monkeypatch.setattr("agent.trading_brain.get_open_recommendations", lambda **kwargs: [])
+    monkeypatch.setattr("agent.trading_brain.select_weekly_trades", lambda **kwargs: _selection_result(_candidate("AAPL")))
+    monkeypatch.setattr("agent.trading_brain.get_win_loss_record", lambda **kwargs: {"wins": 0, "losses": 0, "win_rate": 0.0})
+    monkeypatch.setattr("agent.trading_brain.get_strategy_performance", lambda **kwargs: {"overall": {}})
+
+    def slow_regime(**kwargs):
+        time.sleep(0.2)
+        return {"ok": True, "regime": "neutral_chop", "summary": "Should not block."}
+
+    monkeypatch.setattr("agent.trading_brain.get_market_regime_snapshot", slow_regime)
+
+    started = time.monotonic()
+    result = run_weekly_trade_hunt(
+        include_market_regime=True,
+        include_portfolio_risk=False,
+        include_relative_strength=False,
+        db_path=db_path,
+    )
+    duration = time.monotonic() - started
+
+    assert duration < 0.2
+    assert result["ok"] is True
+    assert result["market_regime"]["timed_out"] is True
+    assert result["market_regime"]["ok"] is False
+    assert result["summary"]["selected_count"] >= 0
+    assert any("Market regime context timed out" in warning for warning in result["warnings"])
+    assert "ranking_unavailable" not in str(result)
 
 
 def test_trading_brain_preserves_old_behavior_when_market_regime_disabled(monkeypatch, tmp_path):

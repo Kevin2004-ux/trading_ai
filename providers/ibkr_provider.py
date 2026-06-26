@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import math
 import os
@@ -142,6 +143,23 @@ def _load_ib_insync():
     return module, None
 
 
+def _ensure_thread_event_loop() -> asyncio.AbstractEventLoop:
+    """Ensure ib_insync sync wrappers have a loop in worker threads.
+
+    ``IB.connect()`` internally builds a ``connectAsync`` coroutine and runs it
+    on the current thread's loop. Provider calls can run in local worker
+    threads outside FastAPI's bridge, so bind a loop before calling sync IBKR
+    methods to avoid leaked, unawaited coroutines.
+    """
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+
 def _safe_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -271,6 +289,7 @@ def _ibkr_connection() -> Iterator[tuple[Any, Any, dict]]:
     ib = ib_module.IB()
     try:
         try:
+            _ensure_thread_event_loop()
             ib.connect(
                 cfg["host"],
                 cfg["port"],

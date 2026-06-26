@@ -91,6 +91,37 @@ def _build_constraint_result(
     }
 
 
+def _build_price_above_sma_result(
+    *,
+    current_price: float | None,
+    sma_value: float | None,
+    sma_label: str,
+    required_enabled: bool,
+) -> dict:
+    price_is_above = current_price is not None and sma_value is not None and current_price > sma_value
+    passed = (not required_enabled) or price_is_above
+    if required_enabled:
+        required = f"> {sma_value}" if sma_value is not None else f"{sma_label} available and below price"
+    else:
+        required = "not required by profile"
+
+    if price_is_above:
+        message = f"Price is above {sma_label}."
+    elif required_enabled:
+        message = f"Price is below {sma_label} or {sma_label} is missing."
+    elif current_price is None or sma_value is None:
+        message = f"{sma_label} comparison is unavailable, but this profile does not require price above {sma_label}."
+    else:
+        message = f"Price is below {sma_label}, but this profile does not require price above {sma_label}."
+
+    return _build_constraint_result(
+        passed,
+        current_price,
+        required,
+        message,
+    )
+
+
 def _score_ratio(actual: float | None, target: float, cap: float = 1.0) -> float:
     if actual is None or target <= 0:
         return 0.0
@@ -300,17 +331,17 @@ def evaluate_stock_constraints(candidate: dict, config: dict | None = None) -> d
             cfg["minimum_relative_volume"],
             "Relative volume meets minimum threshold." if relative_volume is not None and relative_volume >= cfg["minimum_relative_volume"] else "Relative volume is missing or too low.",
         ),
-        "price_above_sma_20": _build_constraint_result(
-            (not cfg["require_price_above_sma_20"]) or (current_price is not None and sma_20 is not None and current_price > sma_20),
-            current_price,
-            f"> {sma_20}" if sma_20 is not None else "sma_20 available and below price",
-            "Price is above SMA 20." if (not cfg["require_price_above_sma_20"]) or (current_price is not None and sma_20 is not None and current_price > sma_20) else "Price is below SMA 20 or SMA 20 is missing.",
+        "price_above_sma_20": _build_price_above_sma_result(
+            current_price=current_price,
+            sma_value=sma_20,
+            sma_label="SMA 20",
+            required_enabled=bool(cfg["require_price_above_sma_20"]),
         ),
-        "price_above_sma_50": _build_constraint_result(
-            (not cfg["require_price_above_sma_50"]) or (current_price is not None and sma_50 is not None and current_price > sma_50),
-            current_price,
-            f"> {sma_50}" if sma_50 is not None else "sma_50 available and below price",
-            "Price is above SMA 50." if (not cfg["require_price_above_sma_50"]) or (current_price is not None and sma_50 is not None and current_price > sma_50) else "Price is below SMA 50 or SMA 50 is missing.",
+        "price_above_sma_50": _build_price_above_sma_result(
+            current_price=current_price,
+            sma_value=sma_50,
+            sma_label="SMA 50",
+            required_enabled=bool(cfg["require_price_above_sma_50"]),
         ),
         "minimum_risk_reward": _build_constraint_result(
             risk_reward is not None and risk_reward >= cfg["minimum_risk_reward"],

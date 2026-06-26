@@ -837,7 +837,7 @@ def build_research_brief(
         statistical_context = {"ticker_history": analyze_ticker_history(normalized_ticker, db_path=db_path)}
 
     catalyst_context = get_catalyst_snapshot(normalized_ticker, lookback_days=7) if include_catalysts else None
-    market_regime = get_market_regime_snapshot(include_breadth=True, db_path=db_path) if include_market_regime else None
+    market_regime = get_market_regime_snapshot(include_breadth=False, db_path=db_path) if include_market_regime else None
     sector = None
     if isinstance(candidate, dict):
         sector = candidate.get("sector") or candidate.get("industry_sector")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -52,6 +53,7 @@ from tracking.trade_logger import (
 
 DEFAULT_HOLDING_PERIOD_DAYS = 7
 DEFAULT_MINIMUM_RISK_REWARD = 2.0
+MARKET_REGIME_TIMEOUT_WARNING = "Market regime context timed out; using candidate-level data only."
 
 
 def _now_iso() -> str:
@@ -65,6 +67,104 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_env_float(name: str, default: float, minimum: float = 0.01, maximum: float = 120.0) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _safe_env_int(name: str, default: int, minimum: int = 0, maximum: int = 100) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _regime_timeout_result(include_breadth: bool, timeout_seconds: float) -> dict:
+    return {
+        "ok": False,
+        "timestamp": _now_iso(),
+        "regime": "unknown",
+        "risk_level": "medium",
+        "confidence": 0.0,
+        "confidence_label": "low",
+        "trade_aggressiveness": "candidate_level_only",
+        "stock_risk_multiplier": 1.0,
+        "option_risk_multiplier": 0.0,
+        "allowed_setups": [],
+        "blocked_setups": [],
+        "max_trades_adjustment": 0,
+        "long_bias": False,
+        "short_bias": False,
+        "options_aggressiveness": "normal",
+        "index_context": {},
+        "breadth_context": {
+            "ok": False,
+            "sample_size": 0,
+            "breadth_label": "unknown",
+            "error": MARKET_REGIME_TIMEOUT_WARNING,
+        },
+        "risk_flags": [],
+        "warnings": [MARKET_REGIME_TIMEOUT_WARNING],
+        "reasons": [MARKET_REGIME_TIMEOUT_WARNING],
+        "data_quality": {"quality_label": "unavailable"},
+        "summary": MARKET_REGIME_TIMEOUT_WARNING,
+        "include_breadth": include_breadth,
+        "timed_out": True,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+def _load_market_regime_bounded(
+    *,
+    include_breadth: bool,
+    db_path: str,
+    timeout_seconds: float | None = None,
+    breadth_timeout_seconds: float | None = None,
+    breadth_sample_size: int | None = None,
+) -> dict:
+    timeout = timeout_seconds if timeout_seconds is not None else _safe_env_float("MARKET_REGIME_TIMEOUT_SECONDS", 10.0)
+    breadth_timeout = breadth_timeout_seconds if breadth_timeout_seconds is not None else _safe_env_float("MARKET_REGIME_BREADTH_TIMEOUT_SECONDS", 8.0)
+    sample_size = breadth_sample_size if breadth_sample_size is not None else _safe_env_int("MARKET_REGIME_BREADTH_SAMPLE_SIZE", 5)
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trading-brain-market-regime")
+    future = executor.submit(
+        get_market_regime_snapshot,
+        include_breadth=include_breadth,
+        db_path=db_path,
+        timeout_seconds=timeout,
+        breadth_timeout_seconds=breadth_timeout,
+        breadth_sample_size=sample_size,
+    )
+    try:
+        outer_timeout = timeout + min(0.5, max(0.01, timeout * 0.1))
+        result = future.result(timeout=outer_timeout)
+        return result if isinstance(result, dict) else _regime_timeout_result(include_breadth, timeout)
+    except FutureTimeoutError:
+        return _regime_timeout_result(include_breadth, timeout)
+    except Exception as exc:
+        result = _regime_timeout_result(include_breadth, timeout)
+        message = f"Market regime context unavailable: {exc}"
+        result["summary"] = message
+        result["warnings"] = [message]
+        result["reasons"] = [message]
+        result["breadth_context"]["error"] = message
+        return result
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _should_include_market_breadth(universe_result: dict) -> bool:
+    try:
+        count = int(universe_result.get("count") or len(universe_result.get("tickers") or []))
+    except (TypeError, ValueError):
+        count = 0
+    return count > 1
 
 
 def _normalize_ticker(value: Any) -> str:
@@ -1395,6 +1495,7 @@ def run_weekly_trade_hunt(
     scanner_config: dict | None = None,
 ) -> dict:
     errors: list[str] = []
+    warnings: list[str] = []
     concentration_summary = None
     if isinstance(universe_result_override, dict):
         universe_result = deepcopy(universe_result_override)
@@ -1547,7 +1648,12 @@ def run_weekly_trade_hunt(
 
     market_regime = None
     if include_market_regime:
-        market_regime = get_market_regime_snapshot(include_breadth=True, db_path=db_path)
+        market_regime = _load_market_regime_bounded(
+            include_breadth=_should_include_market_breadth(universe_result),
+            db_path=db_path,
+        )
+        if isinstance(market_regime, dict) and market_regime.get("warnings"):
+            warnings.extend(str(item) for item in market_regime.get("warnings", []) if item)
 
     if isinstance(macro_risk, dict) and not macro_risk.get("new_trades_allowed", True):
         performance_context = {
@@ -2024,6 +2130,7 @@ def run_weekly_trade_hunt(
             "scan_execution_summary": scan_execution_summary,
             "message": summary_message,
         },
+        "warnings": list(dict.fromkeys(str(warning) for warning in warnings if warning)),
         "errors": errors,
     }
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from datetime import datetime, timezone
+import os
+import time
 from typing import Any
 
 from realtime.market_data import get_market_snapshot
@@ -9,7 +12,10 @@ from providers.market_data_provider import is_ibkr_market_data_provider
 from scanner.universe_builder import get_default_universe
 
 
-DEFAULT_BREADTH_SAMPLE_SIZE = 30
+DEFAULT_MARKET_REGIME_TIMEOUT_SECONDS = 10.0
+DEFAULT_MARKET_REGIME_BREADTH_TIMEOUT_SECONDS = 8.0
+DEFAULT_BREADTH_SAMPLE_SIZE = 5
+MARKET_REGIME_TIMEOUT_WARNING = "Market regime context timed out; using candidate-level data only."
 
 
 def _now_iso() -> str:
@@ -23,6 +29,73 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _env_float(name: str, default: float, minimum: float = 0.01, maximum: float = 120.0) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _env_int(name: str, default: int, minimum: int = 0, maximum: int = 100) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _timeout_seconds(value: float | None, env_name: str, default: float) -> float:
+    if value is not None:
+        try:
+            return max(0.01, min(float(value), 120.0))
+        except (TypeError, ValueError):
+            pass
+    return _env_float(env_name, default)
+
+
+def _breadth_sample_size(value: int | None = None) -> int:
+    if value is not None:
+        try:
+            return max(0, min(int(value), 100))
+        except (TypeError, ValueError):
+            pass
+    return _env_int("MARKET_REGIME_BREADTH_SAMPLE_SIZE", DEFAULT_BREADTH_SAMPLE_SIZE, minimum=0, maximum=100)
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _timeout_snapshot(ticker: str, error: str) -> dict:
+    return {
+        "ok": False,
+        "ticker": ticker,
+        "source": "unavailable",
+        "timestamp": _now_iso(),
+        "data": None,
+        "error": error,
+        "warning": error,
+        "error_type": "timeout",
+    }
+
+
+def _get_market_snapshot_bounded(ticker: str, lookback_days: int, timeout_seconds: float) -> dict:
+    if timeout_seconds <= 0:
+        return _timeout_snapshot(ticker, f"{ticker} market-regime snapshot timed out before it could start.")
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"market-regime-{ticker.lower()}")
+    future = executor.submit(get_market_snapshot, ticker, lookback_days=lookback_days)
+    try:
+        result = future.result(timeout=timeout_seconds)
+        return result if isinstance(result, dict) else _timeout_snapshot(ticker, f"{ticker} market-regime snapshot returned malformed data.")
+    except FutureTimeoutError:
+        return _timeout_snapshot(ticker, f"{ticker} market-regime snapshot timed out after {round(timeout_seconds, 2)} seconds.")
+    except Exception as exc:
+        return _timeout_snapshot(ticker, f"{ticker} market-regime snapshot failed: {exc}")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _snapshot_technical(snapshot: dict | None) -> dict:
@@ -87,13 +160,14 @@ def _vix_unavailable_snapshot(error: str) -> dict:
     }
 
 
-def _get_optional_vix_snapshot() -> dict:
+def _get_optional_vix_snapshot(timeout_seconds: float | None = None) -> dict:
     if is_ibkr_market_data_provider():
         return _vix_unavailable_snapshot(
             "IBKR VIX stock-contract lookup skipped. VIX is an index, not a SMART-routed stock."
         )
     try:
-        return get_market_snapshot("I:VIX", lookback_days=120)
+        timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_MARKET_REGIME_TIMEOUT_SECONDS
+        return _get_market_snapshot_bounded("I:VIX", lookback_days=120, timeout_seconds=timeout)
     except Exception as exc:
         return _vix_unavailable_snapshot(f"VIX snapshot request failed: {exc}")
 
@@ -555,23 +629,52 @@ def determine_market_regime(
 def get_market_regime_snapshot(
     include_breadth: bool = False,
     db_path: str = "strategy_library.db",
+    timeout_seconds: float | None = None,
+    breadth_timeout_seconds: float | None = None,
+    breadth_sample_size: int | None = None,
 ) -> dict:
     del db_path
 
-    spy_snapshot = get_market_snapshot("SPY", lookback_days=250)
-    qqq_snapshot = get_market_snapshot("QQQ", lookback_days=250)
-    iwm_snapshot = get_market_snapshot("IWM", lookback_days=250)
-    vix_snapshot = _get_optional_vix_snapshot()
+    total_timeout = _timeout_seconds(timeout_seconds, "MARKET_REGIME_TIMEOUT_SECONDS", DEFAULT_MARKET_REGIME_TIMEOUT_SECONDS)
+    breadth_timeout = _timeout_seconds(
+        breadth_timeout_seconds,
+        "MARKET_REGIME_BREADTH_TIMEOUT_SECONDS",
+        DEFAULT_MARKET_REGIME_BREADTH_TIMEOUT_SECONDS,
+    )
+    sample_size = _breadth_sample_size(breadth_sample_size)
+    deadline = time.monotonic() + total_timeout
+    warnings: list[str] = []
+
+    spy_snapshot = _get_market_snapshot_bounded("SPY", lookback_days=250, timeout_seconds=_remaining(deadline))
+    qqq_snapshot = _get_market_snapshot_bounded("QQQ", lookback_days=250, timeout_seconds=_remaining(deadline))
+    iwm_snapshot = _get_market_snapshot_bounded("IWM", lookback_days=250, timeout_seconds=_remaining(deadline))
+    vix_snapshot = _get_optional_vix_snapshot(timeout_seconds=_remaining(deadline))
+    for snapshot in (spy_snapshot, qqq_snapshot, iwm_snapshot, vix_snapshot):
+        warning = snapshot.get("warning") if isinstance(snapshot, dict) else None
+        if warning:
+            warnings.append(str(warning))
 
     breadth_snapshots: list[dict] | None = None
-    if include_breadth:
-        universe_result = get_default_universe(universe="large_cap", max_tickers=DEFAULT_BREADTH_SAMPLE_SIZE)
+    breadth_deadline = min(deadline, time.monotonic() + breadth_timeout)
+    breadth_timed_out = False
+    if include_breadth and sample_size > 0 and _remaining(deadline) > 0:
+        universe_result = get_default_universe(universe="large_cap", max_tickers=sample_size)
         if isinstance(universe_result, dict) and universe_result.get("ok"):
             breadth_snapshots = []
-            for ticker in universe_result.get("tickers", [])[:DEFAULT_BREADTH_SAMPLE_SIZE]:
-                snapshot = get_market_snapshot(ticker, lookback_days=120)
+            for ticker in universe_result.get("tickers", [])[:sample_size]:
+                remaining = min(_remaining(deadline), _remaining(breadth_deadline))
+                if remaining <= 0:
+                    breadth_timed_out = True
+                    break
+                snapshot = _get_market_snapshot_bounded(ticker, lookback_days=120, timeout_seconds=remaining)
                 if isinstance(snapshot, dict):
                     breadth_snapshots.append(snapshot)
+                    if snapshot.get("warning"):
+                        warnings.append(str(snapshot["warning"]))
+        if breadth_timed_out:
+            warnings.append("Market breadth context timed out; continuing with index-only regime context.")
+    elif include_breadth and sample_size <= 0:
+        warnings.append("Market breadth context skipped because MARKET_REGIME_BREADTH_SAMPLE_SIZE is 0.")
 
     regime_result = determine_market_regime(
         spy_snapshot=spy_snapshot if spy_snapshot.get("ok") else None,
@@ -581,6 +684,10 @@ def get_market_regime_snapshot(
         universe_snapshots=breadth_snapshots,
     )
     regime_result["include_breadth"] = include_breadth
+    regime_result["breadth_sample_size_requested"] = sample_size if include_breadth else 0
+    regime_result["breadth_timed_out"] = breadth_timed_out
+    regime_result["timeout_seconds"] = total_timeout
+    regime_result["breadth_timeout_seconds"] = breadth_timeout
     regime_result["snapshots_requested"] = ["SPY", "QQQ", "IWM", "VIX"]
     regime_result["snapshot_status"] = {
         "SPY": "available" if spy_snapshot.get("ok") else "unavailable",
@@ -588,6 +695,13 @@ def get_market_regime_snapshot(
         "IWM": "available" if iwm_snapshot.get("ok") else "unavailable",
         "VIX": "available" if vix_snapshot.get("ok") else "fallback",
     }
+    if _remaining(deadline) <= 0:
+        warnings.append(MARKET_REGIME_TIMEOUT_WARNING)
+        regime_result["timed_out"] = True
+    else:
+        regime_result["timed_out"] = bool(breadth_timed_out)
+    if warnings:
+        regime_result["warnings"] = _dedupe(list(regime_result.get("warnings", [])) + warnings)
     return regime_result
 
 

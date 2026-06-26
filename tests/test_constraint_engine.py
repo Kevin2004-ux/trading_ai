@@ -71,6 +71,69 @@ def test_stock_candidate_fails_because_price_is_below_moving_averages():
     assert result["recommendation_status"] == "rejected"
     assert "price_above_sma_20" in result["failed_constraints"]
     assert "price_above_sma_50" in result["failed_constraints"]
+    assert result["constraint_results"]["price_above_sma_20"]["message"] == "Price is below SMA 20 or SMA 20 is missing."
+    assert result["constraint_results"]["price_above_sma_50"]["message"] == "Price is below SMA 50 or SMA 50 is missing."
+
+
+def test_disabled_sma_requirements_pass_with_accurate_below_sma_messages():
+    candidate = _strong_stock_candidate()
+    candidate["current_price"] = 100.0
+    candidate["sma_20"] = 110.0
+    candidate["sma_50"] = 105.0
+
+    result = evaluate_stock_constraints(
+        candidate,
+        config={
+            "require_price_above_sma_20": False,
+            "require_price_above_sma_50": False,
+        },
+    )
+
+    sma_20 = result["constraint_results"]["price_above_sma_20"]
+    sma_50 = result["constraint_results"]["price_above_sma_50"]
+    assert result["passed"] is True
+    assert "price_above_sma_20" not in result["failed_constraints"]
+    assert "price_above_sma_50" not in result["failed_constraints"]
+    assert sma_20["passed"] is True
+    assert sma_20["required"] == "not required by profile"
+    assert sma_20["message"] == "Price is below SMA 20, but this profile does not require price above SMA 20."
+    assert sma_50["passed"] is True
+    assert sma_50["required"] == "not required by profile"
+    assert sma_50["message"] == "Price is below SMA 50, but this profile does not require price above SMA 50."
+    expected_status = "recommendable" if result["score"] >= result["config"]["minimum_score_to_recommend"] else "watchlist"
+    assert result["recommendation_status"] == expected_status
+
+
+def test_enabled_sma_requirement_with_price_above_sma_passes_with_normal_message():
+    candidate = _strong_stock_candidate()
+
+    result = evaluate_stock_constraints(candidate)
+
+    assert result["constraint_results"]["price_above_sma_20"]["passed"] is True
+    assert result["constraint_results"]["price_above_sma_20"]["message"] == "Price is above SMA 20."
+    assert result["constraint_results"]["price_above_sma_50"]["passed"] is True
+    assert result["constraint_results"]["price_above_sma_50"]["message"] == "Price is above SMA 50."
+
+
+def test_sma_message_fix_does_not_change_score_calculation():
+    candidate = _strong_stock_candidate()
+    candidate["current_price"] = 100.0
+    candidate["sma_20"] = 110.0
+    candidate["sma_50"] = 105.0
+
+    enabled = evaluate_stock_constraints(candidate)
+    disabled = evaluate_stock_constraints(
+        candidate,
+        config={
+            "require_price_above_sma_20": False,
+            "require_price_above_sma_50": False,
+        },
+    )
+
+    assert disabled["score"] == enabled["score"]
+    assert enabled["recommendation_status"] == "rejected"
+    expected_disabled_status = "recommendable" if disabled["score"] >= disabled["config"]["minimum_score_to_recommend"] else "watchlist"
+    assert disabled["recommendation_status"] == expected_disabled_status
 
 
 def test_stock_candidate_with_lower_score_becomes_watchlist():

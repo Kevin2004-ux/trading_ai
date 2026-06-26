@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from contextlib import contextmanager
 import threading
 import time
+import warnings
 
 from providers import ibkr_provider
 
@@ -168,6 +170,43 @@ def test_mocked_ibkr_historical_bars_normalize_to_existing_schema(monkeypatch):
     assert result["source"] == "ibkr"
     assert result["data"]["row_count"] == 2
     assert set(result["data"]["bars"][0]) == {"timestamp", "open", "high", "low", "close", "volume"}
+
+
+def test_ibkr_connect_has_event_loop_in_worker_thread_without_unawaited_warning(monkeypatch):
+    class AsyncStyleConnectIB(FakeIB):
+        def __init__(self):
+            super().__init__(
+                bars=[
+                    SimpleNamespace(date="2026-06-05", open=100, high=103, low=99, close=102, volume=1000),
+                ]
+            )
+
+        def connect(self, host, port, clientId, readonly=True, timeout=8):
+            async def connect_async():
+                self.connected = True
+                return self
+
+            coroutine = connect_async()
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(coroutine)
+
+    monkeypatch.setattr(ibkr_provider.importlib, "import_module", lambda name: _fake_module(AsyncStyleConnectIB))
+    result_holder = {}
+    caught_warnings = []
+
+    def worker():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            result_holder["result"] = ibkr_provider.get_ibkr_historical_bars("AAPL", lookback_days=1)
+            caught_warnings.extend(caught)
+
+    thread = threading.Thread(target=worker, name="ibkr-provider-test-worker")
+    thread.start()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert result_holder["result"]["ok"] is True
+    assert not any("was never awaited" in str(item.message) for item in caught_warnings)
 
 
 def test_mocked_ibkr_quote_normalizes_to_existing_schema(monkeypatch):

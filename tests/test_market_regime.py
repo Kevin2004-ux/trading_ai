@@ -4,6 +4,7 @@ from analytics.market_regime import (
     determine_market_regime,
     get_market_regime_snapshot,
 )
+import time
 
 
 def _snapshot(
@@ -158,6 +159,54 @@ def test_get_market_regime_snapshot_skips_ibkr_vix_stock_lookup(monkeypatch):
     assert result["snapshot_status"]["VIX"] == "fallback"
     assert result["index_context"]["VIX"]["source"] == "SPY_ATR"
     assert any("VIX unavailable" in warning for warning in result["warnings"])
+
+
+def test_get_market_regime_snapshot_bounds_breadth_sample(monkeypatch):
+    requested = []
+
+    def fake_snapshot(ticker, lookback_days=180):
+        requested.append(ticker)
+        return _snapshot(ticker, current_price=600, sma_20=590, sma_50=580, sma_200=550, atr_percent=2.1)
+
+    monkeypatch.setattr("analytics.market_regime.is_ibkr_market_data_provider", lambda: True)
+    monkeypatch.setattr("analytics.market_regime.get_market_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        "analytics.market_regime.get_default_universe",
+        lambda universe="large_cap", max_tickers=5: {"ok": True, "tickers": ["AAPL", "MSFT", "NVDA", "META"], "count": 4},
+    )
+
+    result = get_market_regime_snapshot(
+        include_breadth=True,
+        timeout_seconds=2,
+        breadth_timeout_seconds=2,
+        breadth_sample_size=2,
+    )
+
+    assert result["ok"] is True
+    assert result["include_breadth"] is True
+    assert result["breadth_sample_size_requested"] == 2
+    assert "AAPL" in requested
+    assert "MSFT" in requested
+    assert "NVDA" not in requested
+    assert "VIX" not in requested
+
+
+def test_get_market_regime_snapshot_timeout_returns_warning(monkeypatch):
+    def slow_snapshot(ticker, lookback_days=180):
+        time.sleep(0.2)
+        return _snapshot(ticker, current_price=600, sma_20=590, sma_50=580, sma_200=550, atr_percent=2.1)
+
+    monkeypatch.setattr("analytics.market_regime.is_ibkr_market_data_provider", lambda: True)
+    monkeypatch.setattr("analytics.market_regime.get_market_snapshot", slow_snapshot)
+
+    started = time.monotonic()
+    result = get_market_regime_snapshot(include_breadth=True, timeout_seconds=0.01, breadth_timeout_seconds=0.01)
+    duration = time.monotonic() - started
+
+    assert duration < 0.2
+    assert result["timed_out"] is True
+    assert any("Market regime context timed out" in warning for warning in result["warnings"])
+    assert result["snapshot_status"]["VIX"] == "fallback"
 
 
 def test_breadth_calculation_works():
