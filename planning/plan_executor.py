@@ -64,6 +64,7 @@ def _empty_execution_summary() -> dict:
         "effective_direction": "long",
         "unapplied_preferences": [],
         "provider_capabilities": configured_provider_capabilities(),
+        "user_intent": {},
     }
 
 
@@ -102,6 +103,7 @@ def _base_response(
         "discovery_result": empty_discovery_result(),
         "discovery_summary": summarize_discovery_result(empty_discovery_result()),
         "provider_capabilities": configured_provider_capabilities(),
+        "user_intent": {},
         "execution_summary": _empty_execution_summary(),
         "trading_result": {},
         "option_discovery": empty_option_discovery_response(requested=False, reason="Option discovery was not requested."),
@@ -223,10 +225,13 @@ def _build_execution_universe(
         return build_combined_universe(execution_config), empty_discovery_result(bypass_reason=bypass_reason)
 
     max_discovered = _max_discovered_tickers(controls, execution_config)
+    seed_universe = build_combined_universe(execution_config)
     discovery_result = discover_candidates(
         db_path=db_path,
         requested_sources=_control_list(controls, "discovery_sources", DEFAULT_DISCOVERY_SOURCES),
         max_tickers=max_discovered,
+        intent_constraints=_as_dict(controls.get("intent_constraints")),
+        seed_tickers=_as_list(seed_universe.get("tickers")),
     )
     discovered_tickers = _as_list(discovery_result.get("tickers"))
     validated = validate_ticker_universe(discovered_tickers, max_tickers=max_discovered)
@@ -257,7 +262,7 @@ def _build_execution_universe(
         }
         return universe_result, discovery_result
 
-    fallback = build_combined_universe(execution_config)
+    fallback = seed_universe
     discovery_result = {
         **discovery_result,
         "discovery_used": False,
@@ -464,6 +469,8 @@ def execute_scan_plan(
     approved_plan = _as_dict(policy_validation.get("approved_plan"))
     execution_config = _as_dict(policy_validation.get("execution_config"))
     controls = _as_dict(internal_controls)
+    intent_constraints = _as_dict(controls.get("intent_constraints") or approved_plan.get("user_intent"))
+    response["user_intent"] = intent_constraints
     run_option_discovery = bool(controls.get("run_option_discovery", True))
     run_current_research = bool(controls.get("run_current_research", True))
     record_learning = bool(controls.get("record_learning", True))
@@ -513,6 +520,7 @@ def execute_scan_plan(
                 "effective_direction": effective_direction,
                 "discovery_summary": response["discovery_summary"],
                 "unapplied_preferences": _unapplied_preferences(approved_plan, execution_config, policy_validation.get("proposed_plan")),
+                "user_intent": intent_constraints,
             }
         )
         response["errors"] = list(dict.fromkeys(errors))
@@ -556,11 +564,14 @@ def execute_scan_plan(
         scanner_config={
             "plan_executor": True,
             "execution_version": EXECUTION_VERSION,
+            "intent_constraints": intent_constraints,
+            "soft_scanner_preferences": _as_dict(execution_config.get("soft_scanner_preferences")),
         },
     )
     response["trading_result"] = trading_result if isinstance(trading_result, dict) else {}
     response["trading_result"]["discovery_result"] = discovery_result
     response["trading_result"]["discovery_summary"] = response["discovery_summary"]
+    response["trading_result"]["user_intent"] = intent_constraints
     provider_capabilities = summarize_provider_capabilities(response["trading_result"])
     response["provider_capabilities"] = provider_capabilities
     response["trading_result"]["provider_capabilities"] = provider_capabilities
@@ -610,7 +621,9 @@ def execute_scan_plan(
         run_id=run_id,
     )
     assistant_response.setdefault("market_state", {})["provider_capabilities"] = provider_capabilities
+    assistant_response.setdefault("market_state", {})["user_intent"] = intent_constraints
     assistant_response.setdefault("scan_summary", {})["active_policy_version"] = response["active_policy_version"]
+    assistant_response.setdefault("scan_summary", {})["user_intent"] = intent_constraints
     research = (
         _run_current_research_if_requested(approved_plan, assistant_response, run_id, warnings)
         if run_current_research
@@ -669,6 +682,7 @@ def execute_scan_plan(
             "discovery_used": universe_result.get("source") == "dynamic_discovery",
             "discovery_summary": response["discovery_summary"],
             "provider_capabilities": provider_capabilities,
+            "user_intent": intent_constraints,
         }
     )
     response["warnings"] = list(dict.fromkeys(str(item) for item in warnings if item))

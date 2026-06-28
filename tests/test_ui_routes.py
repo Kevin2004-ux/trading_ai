@@ -1347,7 +1347,7 @@ def test_api_chat_broad_stock_scan_uses_bounded_chat_controls(monkeypatch):
     assert captured["internal_controls"]["stop_after_first_legitimate_pass"] is True
     assert captured["internal_controls"]["use_dynamic_discovery"] is True
     assert captured["internal_controls"]["max_discovered_tickers"] == 7
-    assert captured["internal_controls"]["discovery_sources"] == ["manual_hotlist", "database_recent", "liquid_fallback"]
+    assert captured["internal_controls"]["discovery_sources"] == ["external_catalyst", "manual_hotlist", "database_recent", "liquid_fallback"]
     assert captured["internal_controls"]["scan_total_timeout_seconds"] < 45.0
     assert captured["include_options"] is False
     assert payload["discovery_summary"]["discovery_used"] is True
@@ -1397,6 +1397,27 @@ def test_api_chat_options_request_can_send_include_options_true(monkeypatch):
     assert response.status_code == 200
     assert captured["include_options"] is True
     assert captured["prefer_options"] is True
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_options_earnings_prompt_extracts_intent_constraints(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="AAPL", include_options=True))
+
+    response = client.post("/api/chat", json={"message": "Find me options under $250 premium with upcoming earnings"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert captured["include_options"] is True
+    assert captured["prefer_options"] is True
+    assert captured["proposed_plan"]["option_preferences"]["max_option_premium"] == 250
+    assert captured["internal_controls"]["intent_constraints"]["require_upcoming_earnings"] is True
+    assert captured["internal_controls"]["intent_constraints"]["max_option_premium"] == 250
+    assert captured["internal_controls"]["discovery_sources"][0] == "external_catalyst"
+    assert payload["user_intent"]["strategy_profile"] == "earnings_options"
+    assert payload["paper_trading_only"] is True
+    assert payload["brokerage_execution_enabled"] is False
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")

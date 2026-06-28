@@ -496,6 +496,62 @@ def test_option_discovery_uses_ranked_underlying_near_misses_not_only_final_sele
     assert result["trading_result"]["decision_result"]["final_recommendations"] == []
 
 
+def test_option_premium_intent_reaches_option_preferences(monkeypatch):
+    captured = {}
+
+    def fake_run_weekly_trade_hunt(**kwargs):
+        return _fake_trading_result()
+
+    def fake_discover(stock_candidates, **kwargs):
+        captured["option_preferences"] = kwargs.get("option_preferences")
+        return {
+            "ok": True,
+            "discovery_version": "option_discovery_v1",
+            "status": "unavailable",
+            "paper_trading_only": True,
+            "brokerage_execution_enabled": False,
+            "requested": True,
+            "provider_status": "unknown",
+            "options_final_eligibility": False,
+            "underlyings_considered": [],
+            "underlying_shortlist": [],
+            "contracts_evaluated": 0,
+            "strategies_evaluated": 0,
+            "paper_eligible_contracts": [],
+            "research_only_contracts": [],
+            "blocked_contracts": [],
+            "underlying_watchlist": [],
+            "missing_requirements": [],
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("planning.plan_executor.run_weekly_trade_hunt", fake_run_weekly_trade_hunt)
+    monkeypatch.setattr("planning.plan_executor.discover_option_ideas", fake_discover)
+
+    result = execute_scan_plan(
+        {
+            "requested_instrument": "options",
+            "include_options": True,
+            "option_preferences": {"max_option_premium": 250, "min_dte": 14, "max_dte": 45},
+        },
+        internal_controls={
+            "intent_constraints": {
+                "requested_instrument": "options",
+                "max_option_premium": 250,
+                "require_upcoming_earnings": True,
+            }
+        },
+    )
+
+    assert result["ok"] is True
+    assert captured["option_preferences"]["max_option_premium"] == 250
+    assert result["execution_config"]["max_option_premium"] == 250
+    assert result["user_intent"]["max_option_premium"] == 250
+    assert result["paper_trading_only"] is True
+    assert result["brokerage_execution_enabled"] is False
+
+
 def test_provider_unavailable_returns_unavailable_and_empty_rankings(monkeypatch):
     def fake_run_weekly_trade_hunt(**kwargs):
         return {

@@ -48,7 +48,15 @@ from paper.paper_trader import (  # noqa: E402
     review_paper_portfolio,
     run_paper_trade_cycle,
 )
-from planning import execute_adaptive_scan_plan, execute_scan_plan, get_ai_planner_status, propose_scan_plan, validate_scan_plan  # noqa: E402
+from planning import (  # noqa: E402
+    apply_intent_constraints_to_plan,
+    execute_adaptive_scan_plan,
+    execute_scan_plan,
+    extract_intent_constraints,
+    get_ai_planner_status,
+    propose_scan_plan,
+    validate_scan_plan,
+)
 from research import build_current_research, get_research_runtime_status  # noqa: E402
 from realtime.market_data import get_market_snapshot  # noqa: E402
 from realtime.options_chain import get_options_chain  # noqa: E402
@@ -73,7 +81,7 @@ DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS = 45.0
 CHAT_SCAN_TIMEOUT_WARNING = "Market data provider timed out. IBKR/TWS may be unavailable or blocked by a stale API session."
 DEFAULT_CHAT_BROAD_SCAN_MAX_TICKERS = 6
 DEFAULT_CHAT_BROAD_SCAN_MAX_CANDIDATES = 6
-DEFAULT_CHAT_DISCOVERY_SOURCES = ["manual_hotlist", "database_recent", "liquid_fallback"]
+DEFAULT_CHAT_DISCOVERY_SOURCES = ["external_catalyst", "manual_hotlist", "database_recent", "liquid_fallback"]
 
 
 def _load_optional_prediction_dossier() -> tuple[Callable | None, str | None]:
@@ -847,12 +855,17 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
         user_preferences=user_preferences,
     )
     approved_plan = planner_result.get("approved_plan", {}) if isinstance(planner_result, dict) else {}
-    execution_plan = _prepare_chat_execution_plan(message, approved_plan)
+    intent_constraints = extract_intent_constraints(message, planner_intent=planner_result.get("intent", {}) if isinstance(planner_result, dict) else {})
+    execution_plan = apply_intent_constraints_to_plan(
+        _prepare_chat_execution_plan(message, approved_plan),
+        intent_constraints,
+    )
     use_adaptive = _should_use_adaptive_chat_execution(execution_plan)
     internal_controls = _chat_scan_internal_controls(
         timeout_seconds or _chat_scan_timeout_seconds(),
         broad_scan=_broad_trade_idea_plan(execution_plan),
     )
+    internal_controls["intent_constraints"] = intent_constraints
     execution_result = (
         execute_adaptive_scan_plan(execution_plan, runtime_context={}, db_path=db_path, message=message, internal_controls=internal_controls)
         if use_adaptive
@@ -879,6 +892,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
         "discovery_result": discovery_result,
         "discovery_summary": discovery_summary,
         "provider_capabilities": provider_capabilities,
+        "user_intent": intent_constraints,
         "best_available_ideas": best_ideas,
         "assistant_response": assistant_response,
         "formatted_best_ideas_summary": execution_result.get("formatted_response") or format_best_ideas_response(assistant_response),
@@ -900,6 +914,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
                 "passes_executed": execution_result.get("passes_executed"),
                 "stop_reason": execution_result.get("stop_reason"),
                 "refinement_used": execution_result.get("refinement_used"),
+                "auto_log": False,
                 "discovery_summary": discovery_summary,
                 "provider_capabilities": provider_capabilities,
             }
@@ -1003,6 +1018,7 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
             "discovery_result": best_ideas_payload.get("discovery_result", {}),
             "discovery_summary": best_ideas_payload.get("discovery_summary", {}),
             "provider_capabilities": best_ideas_payload.get("provider_capabilities", []),
+            "user_intent": best_ideas_payload.get("user_intent", {}),
             "formatted_best_ideas_summary": answer,
             "planner": planner_result,
             "planner_provider": planner_result.get("provider"),
@@ -1034,6 +1050,7 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
                 "discovery_result": best_ideas_payload.get("discovery_result", {}),
                 "discovery_summary": best_ideas_payload.get("discovery_summary", {}),
                 "provider_capabilities": best_ideas_payload.get("provider_capabilities", []),
+                "user_intent": best_ideas_payload.get("user_intent", {}),
                 "refinement_used": bool(best_ideas_payload.get("refinement_used")),
                 "passes_executed": int(best_ideas_payload.get("passes_executed") or 1),
                 "refinement_stop_reason": best_ideas_payload.get("refinement_stop_reason") or "",

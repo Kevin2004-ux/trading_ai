@@ -14,6 +14,7 @@ class OptionPreferences(BaseModel):
     min_dte: Any = 14
     max_dte: Any = 56
     max_contracts_per_ticker: Any = 3
+    max_option_premium: Any | None = None
     allowed_strategy_types: list[str] = Field(default_factory=list)
 
 
@@ -35,6 +36,8 @@ class SoftAdjustments(BaseModel):
     minimum_opportunity_score: Any | None = None
     breakout_proximity_percent: Any | None = None
     pullback_distance_percent: Any | None = None
+    min_stock_price: Any | None = None
+    max_stock_price: Any | None = None
 
 
 class RefinementPreferences(BaseModel):

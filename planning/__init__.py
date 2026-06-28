@@ -8,6 +8,11 @@ from .ai_planner import (
     sanitize_user_preferences,
 )
 from .planner_prompts import PLANNER_PROMPT_VERSION, build_planner_system_prompt
+from .intent_constraints import (
+    INTENT_CONSTRAINTS_VERSION,
+    apply_intent_constraints_to_plan,
+    extract_intent_constraints,
+)
 from .policy_validator import (
     IMMUTABLE_RULES,
     POLICY_LIMITS,
@@ -33,6 +38,7 @@ __all__ = [
     "ADAPTIVE_EXECUTION_VERSION",
     "EXECUTION_VERSION",
     "IMMUTABLE_RULES",
+    "INTENT_CONSTRAINTS_VERSION",
     "POLICY_LIMITS",
     "POLICY_VERSION",
     "PlannerIntentModel",
@@ -52,6 +58,8 @@ __all__ = [
     "evaluate_scan_pass",
     "execute_adaptive_scan_plan",
     "execute_scan_plan",
+    "apply_intent_constraints_to_plan",
+    "extract_intent_constraints",
     "get_ai_planner_status",
     "plan_fingerprint",
     "propose_scan_plan",

@@ -64,6 +64,51 @@ def _safe_float(value):
     return numeric
 
 
+def _intent_constraints_from_config(config: dict | None = None) -> dict:
+    if not isinstance(config, dict):
+        return {}
+    intent = config.get("intent_constraints")
+    if isinstance(intent, dict):
+        return intent
+    return {}
+
+
+def _price_bounds_from_config(config: dict | None = None) -> tuple[float | None, float | None]:
+    intent = _intent_constraints_from_config(config)
+    soft = config.get("soft_scanner_preferences") if isinstance(config, dict) and isinstance(config.get("soft_scanner_preferences"), dict) else {}
+    min_price = _safe_float(intent.get("min_stock_price") if intent.get("min_stock_price") is not None else soft.get("min_stock_price"))
+    max_price = _safe_float(intent.get("max_stock_price") if intent.get("max_stock_price") is not None else soft.get("max_stock_price"))
+    return min_price, max_price
+
+
+def _apply_request_price_bounds(candidate: dict, config: dict | None = None) -> tuple[dict, bool]:
+    min_price, max_price = _price_bounds_from_config(config)
+    if min_price is None and max_price is None:
+        return candidate, True
+    current_price = _safe_float(candidate.get("current_price"))
+    if current_price is None:
+        return candidate, True
+    failed = []
+    if min_price is not None and current_price < min_price:
+        failed.append("min_stock_price")
+    if max_price is not None and current_price > max_price:
+        failed.append("max_stock_price")
+    if not failed:
+        return candidate, True
+
+    rejected = deepcopy(candidate)
+    rejected["recommendation_status"] = "rejected"
+    rejected["failed_constraints"] = list(dict.fromkeys(list(rejected.get("failed_constraints") or []) + failed))
+    reasons = []
+    if "min_stock_price" in failed:
+        reasons.append(f"Current price {current_price:.2f} is below requested min stock price {min_price:.2f}.")
+    if "max_stock_price" in failed:
+        reasons.append(f"Current price {current_price:.2f} is above requested max stock price {max_price:.2f}.")
+    rejected["rejection_reason"] = "; ".join(reasons)
+    rejected["passed"] = False
+    return rejected, False
+
+
 def _quality_bucket(candidate: dict) -> str:
     status = str(candidate.get("recommendation_status", "rejected")).lower()
     score = _safe_float(candidate.get("score")) or 0.0
@@ -901,6 +946,12 @@ def scan_swing_candidates(
             errors.append({"ticker": ticker, "type": "candidate_build", "message": rejected["rejection_reason"]})
             continue
 
+        bounded_candidate, price_ok = _apply_request_price_bounds(candidate, cfg)
+        if not price_ok:
+            evaluated_candidates.append(bounded_candidate)
+            errors.append({"ticker": ticker, "type": "intent_constraints", "message": bounded_candidate["rejection_reason"]})
+            continue
+
         trade_levels = calculate_trade_levels(technical_snapshot, direction=candidate["direction"], config=cfg)
         if not trade_levels.get("ok"):
             rejected = deepcopy(candidate)
@@ -1219,6 +1270,22 @@ def scan_multi_strategy_candidates(
                     }
                 )
                 profile_candidates.append(rejected)
+                total_profile_evaluations += 1
+                continue
+
+            bounded_candidate, price_ok = _apply_request_price_bounds(candidate, scan_config)
+            if not price_ok:
+                bounded_candidate.update(
+                    {
+                        "scan_profile": profile_name,
+                        "profile_description": profile["description"],
+                        "why_this_profile_matched": [],
+                        "quality_bucket": "rejected",
+                        "duplicate_reason": None,
+                        "selected_profile": profile_name,
+                    }
+                )
+                profile_candidates.append(bounded_candidate)
                 total_profile_evaluations += 1
                 continue
 

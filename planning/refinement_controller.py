@@ -123,6 +123,7 @@ def _base_response(policy_validation: dict, root_run_id: str) -> dict:
         "discovery_result": empty_discovery_result(),
         "discovery_summary": summarize_discovery_result(empty_discovery_result()),
         "provider_capabilities": [],
+        "user_intent": {},
         "consolidated_result": {},
         "best_available_ideas": {},
         "assistant_response": {},
@@ -678,11 +679,14 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
     system_issues: list[str] = []
     partial_results = False
     discovery_result = empty_discovery_result()
+    user_intent: dict = {}
     for pass_result in passes:
         pass_number = _safe_int(pass_result.get("pass_number"), 1)
         evaluation = _as_dict(pass_result.get("evaluation"))
         partial_results = partial_results or bool(evaluation.get("partial_results"))
         best = _as_dict(_as_dict(pass_result.get("execution_result")).get("best_available_ideas"))
+        if not user_intent:
+            user_intent = _as_dict(_as_dict(pass_result.get("execution_result")).get("user_intent"))
         if not _as_dict(discovery_result).get("discovery_used") and not _as_dict(discovery_result).get("bypass_reason"):
             discovery_result = _as_dict(_as_dict(pass_result.get("execution_result")).get("discovery_result")) or discovery_result
         paper.extend(_raw_with_source(row, pass_number) for row in _as_list(best.get("paper_eligible")) if isinstance(row, dict) and str(row.get("asset_type", "stock")).lower() != "option")
@@ -748,6 +752,7 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
         "discovery_result": discovery_result,
         "discovery_summary": summarize_discovery_result(discovery_result),
         "provider_capabilities": provider_capabilities,
+        "user_intent": user_intent,
         "partial_results": partial_results,
         "errors": [],
         "adaptive_data_missing": _unique_texts(data_missing),
@@ -914,6 +919,7 @@ def execute_adaptive_scan_plan(
     refinement_used = False
     refinement_provider = "none"
     controls = _as_dict(internal_controls)
+    response["user_intent"] = _as_dict(controls.get("intent_constraints") or initial_approved.get("user_intent"))
 
     for pass_number in range(1, max_passes + 1):
         pass_plan = deepcopy(current_plan)
@@ -1053,8 +1059,11 @@ def execute_adaptive_scan_plan(
         )
         response["consolidated_result"] = consolidated
         response["provider_capabilities"] = consolidated.get("provider_capabilities", [])
+        response["user_intent"] = _as_dict(consolidated.get("user_intent")) or response["user_intent"]
         response["best_available_ideas"] = best
         response["assistant_response"] = assistant
+        response["assistant_response"].setdefault("market_state", {})["user_intent"] = response["user_intent"]
+        response["assistant_response"].setdefault("scan_summary", {})["user_intent"] = response["user_intent"]
         response["option_discovery"] = _as_dict(consolidated.get("option_discovery"))
         response["research"] = research
         response["formatted_response"] = formatted

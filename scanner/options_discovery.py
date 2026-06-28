@@ -411,10 +411,21 @@ def _evaluate_contract(
     candidate["passed"] = bool(constraints.get("passed"))
     candidate["rejection_reason"] = constraints.get("rejection_reason")
 
-    if risk.get("approved") and constraints.get("recommendation_status") == "recommendable" and options_final_eligibility:
+    max_premium = _safe_float(option_preferences.get("max_option_premium") or option_preferences.get("max_premium") or option_preferences.get("max_debit"))
+    quoted_price = _safe_float(candidate.get("mid") or candidate.get("ask") or candidate.get("last") or candidate.get("close"))
+    estimated_contract_premium = round(quoted_price * 100.0, 2) if quoted_price is not None else None
+    candidate["max_option_premium"] = max_premium
+    candidate["estimated_contract_premium"] = estimated_contract_premium
+    if max_premium is not None and estimated_contract_premium is not None and estimated_contract_premium > max_premium:
+        candidate["failed_constraints"] = _unique_texts(candidate.get("failed_constraints", []) + ["max_option_premium"])
+        premium_reason = f"Estimated contract premium ${estimated_contract_premium:.2f} exceeds requested max premium ${max_premium:.2f}."
+        candidate["rejection_reason"] = "; ".join(_unique_texts([candidate.get("rejection_reason"), premium_reason]))
+        candidate["passed"] = False
+
+    if risk.get("approved") and constraints.get("recommendation_status") == "recommendable" and bool(candidate.get("passed")) and options_final_eligibility:
         actionability = "paper_eligible"
         candidate["recommendation_status"] = "paper_eligible"
-    elif risk.get("status") == "blocked" or not constraints.get("passed"):
+    elif risk.get("status") == "blocked" or not bool(candidate.get("passed")):
         actionability = "blocked"
         candidate["recommendation_status"] = "blocked"
     else:
@@ -427,6 +438,8 @@ def _evaluate_contract(
         candidate.setdefault("warnings", []).append("Final option eligibility is false until options runtime readiness and deterministic gates pass.")
     if runtime_context.get("safe_to_run_options") is False:
         candidate.setdefault("warnings", []).append("Runtime reports options are not safe for final paper eligibility.")
+    if "max_option_premium" in candidate.get("failed_constraints", []):
+        missing.append("requested_option_premium_budget")
     candidate["actionability_status"] = actionability
     candidate["missing_requirements"] = _unique_texts(missing)
 

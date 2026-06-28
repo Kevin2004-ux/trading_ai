@@ -365,6 +365,13 @@ def _provider_capabilities(trading_result: dict) -> list[dict]:
     return summary if isinstance(summary, list) else []
 
 
+def _user_intent(trading_result: dict) -> dict:
+    root = _as_dict(trading_result)
+    trade_hunt = _as_dict(root.get("trade_hunt"))
+    intent = _as_dict(root.get("user_intent") or trade_hunt.get("user_intent"))
+    return intent
+
+
 def _scan_summary(trading_result: dict, run_id: str | None, include_options: bool, partial_results: bool) -> dict:
     root = _as_dict(trading_result)
     trade_hunt = _as_dict(root.get("trade_hunt"))
@@ -483,6 +490,7 @@ def build_assistant_trade_response(
     provider_status = _provider_status(best_ideas)
     discovery = _discovery_summary(trading_result)
     provider_capabilities = _provider_capabilities(trading_result)
+    user_intent = _user_intent(trading_result)
     market_message = None
     if ranking_status == "unavailable":
         market_message = "Ranking unavailable because usable market data was not returned."
@@ -509,6 +517,7 @@ def build_assistant_trade_response(
             "sources_used": list(_as_list(discovery.get("sources_used"))),
             "discovery_summary": discovery,
             "provider_capabilities": provider_capabilities,
+            "user_intent": user_intent,
             "message": market_message,
         },
         "top_stocks": stock_rows if requested != "options" else [],
@@ -523,7 +532,7 @@ def build_assistant_trade_response(
         "data_missing": list(_as_list(best_ideas.get("data_missing"))),
         "system_issues": list(_as_list(best_ideas.get("system_issues"))),
         "next_steps": list(_as_list(best_ideas.get("next_steps"))),
-        "scan_summary": _scan_summary(trading_result, run_id, include_options, partial),
+        "scan_summary": {**_scan_summary(trading_result, run_id, include_options, partial), "user_intent": user_intent},
         "refinement": {
             "used": False,
             "passes_executed": 1,

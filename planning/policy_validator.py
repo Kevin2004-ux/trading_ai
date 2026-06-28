@@ -31,11 +31,14 @@ POLICY_LIMITS = {
     "option_min_dte": {"min": 7, "max": 90, "default": 14},
     "option_max_dte": {"min": 7, "max": 180, "default": 56},
     "max_contracts_per_ticker": {"min": 1, "max": 10, "default": 3},
+    "max_option_premium": {"min": 1, "max": 10000, "default": None},
     "max_refinement_passes": {"min": 1, "max": 3, "default": 1},
     "minimum_relative_volume": {"min": 0.8, "max": 3.0, "default": None},
     "minimum_opportunity_score": {"min": 0.0, "max": 100.0, "default": None},
     "breakout_proximity_percent": {"min": 0.001, "max": 0.10, "default": None},
     "pullback_distance_percent": {"min": 0.001, "max": 0.15, "default": None},
+    "min_stock_price": {"min": 0.01, "max": 10000, "default": None},
+    "max_stock_price": {"min": 0.01, "max": 10000, "default": None},
 }
 
 IMMUTABLE_RULES = [
@@ -271,12 +274,19 @@ def _normalize_soft_adjustments(plan: dict, adjustments: list[dict]) -> tuple[di
         ("minimum_opportunity_score", "minimum_opportunity_score"),
         ("breakout_proximity_percent", "breakout_proximity_percent"),
         ("pullback_distance_percent", "pullback_distance_percent"),
+        ("min_stock_price", "min_stock_price"),
+        ("max_stock_price", "max_stock_price"),
     ):
         value = soft.get(field)
         if value is None:
             soft_preferences[field] = None
             continue
         soft_preferences[field] = _clamp_number(soft, field, limits_key, adjustments, integer=False)
+    min_price = soft_preferences.get("min_stock_price")
+    max_price = soft_preferences.get("max_stock_price")
+    if min_price is not None and max_price is not None and max_price < min_price:
+        adjustments.append(_adjustment("soft_adjustments.max_stock_price", max_price, min_price, "max_stock_price cannot be below min_stock_price."))
+        soft_preferences["max_stock_price"] = min_price
     return profile_weights, opportunity_weights, soft_preferences
 
 
@@ -375,6 +385,9 @@ def validate_scan_plan(
         adjustments.append(_adjustment("option_preferences.max_dte", option_max_dte, option_min_dte, "max_dte cannot be below min_dte."))
         option_max_dte = option_min_dte
     max_contracts = _clamp_number(option_preferences, "max_contracts_per_ticker", "max_contracts_per_ticker", adjustments)
+    max_option_premium = None
+    if option_preferences.get("max_option_premium") is not None:
+        max_option_premium = _clamp_number(option_preferences, "max_option_premium", "max_option_premium", adjustments, integer=False)
     allowed_strategy_types = _normalize_allowed_strategy_types(option_preferences.get("allowed_strategy_types"))
 
     refinement = _as_dict(plan.get("refinement"))
@@ -415,6 +428,7 @@ def validate_scan_plan(
             "min_dte": option_min_dte,
             "max_dte": option_max_dte,
             "max_contracts_per_ticker": max_contracts,
+            "max_option_premium": max_option_premium,
             "allowed_strategy_types": allowed_strategy_types,
         },
         "research_preferences": _as_dict(plan.get("research_preferences")),
@@ -451,6 +465,7 @@ def validate_scan_plan(
         "max_option_contracts_per_trade": max_contracts,
         "option_min_dte": option_min_dte,
         "option_max_dte": option_max_dte,
+        "max_option_premium": max_option_premium,
         "profile_weights": profile_weights,
         "opportunity_weights": opportunity_weights,
         "soft_scanner_preferences": soft_preferences,

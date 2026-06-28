@@ -8,11 +8,12 @@ from typing import Any
 
 from scanner.universe_builder import validate_ticker_universe
 
+from .external_catalyst_discovery import discover_external_catalyst_candidates
 from .fallback_universe import DEFAULT_FALLBACK_UNIVERSES, discover_liquid_fallback_candidates
 from .source_models import DISCOVERY_VERSION, MAX_DISCOVERED_TICKERS, DiscoveryCandidate, empty_discovery_result, safe_float, unique_texts, utc_now_iso
 
 
-DEFAULT_DISCOVERY_SOURCES = ["manual_hotlist", "database_recent", "liquid_fallback"]
+DEFAULT_DISCOVERY_SOURCES = ["external_catalyst", "manual_hotlist", "database_recent", "liquid_fallback"]
 
 
 def _bounded_int(value: Any, default: int, minimum: int = 1, maximum: int = 100) -> int:
@@ -210,12 +211,16 @@ def _merge_candidates(candidates: list[dict[str, Any]], max_tickers: int) -> lis
         primary["ticker"] = ticker
         primary["discovery_score"] = safe_float(primary.get("discovery_score"))
         primary["sources"] = unique_texts([row.get("source_type") for row in ranked])
+        primary["external_sources"] = unique_texts([row.get("source") for row in ranked if row.get("source_type") == "external_catalyst"])
+        primary["catalyst_types"] = unique_texts([row.get("catalyst_type") for row in ranked])
         primary["reasons"] = unique_texts([reason for row in ranked for reason in row.get("reasons", [])])
         primary["warnings"] = unique_texts([warning for row in ranked for warning in row.get("warnings", [])])
         primary["secondary_sources"] = [
             {
                 "source": row.get("source"),
                 "source_type": row.get("source_type"),
+                "catalyst_type": row.get("catalyst_type"),
+                "headline": row.get("headline") or row.get("title"),
                 "discovery_score": row.get("discovery_score"),
                 "reasons": row.get("reasons", []),
                 "raw_metadata": row.get("raw_metadata", {}),
@@ -227,6 +232,8 @@ def _merge_candidates(candidates: list[dict[str, Any]], max_tickers: int) -> lis
             {
                 "source": row.get("source"),
                 "source_type": row.get("source_type"),
+                "catalyst_type": row.get("catalyst_type"),
+                "headline": row.get("headline") or row.get("title"),
                 "discovery_score": row.get("discovery_score"),
                 "as_of": row.get("as_of"),
             }
@@ -247,6 +254,8 @@ def discover_candidates(
     max_tickers: int = 20,
     fallback_universes: list[str] | None = None,
     discovered_at: str | None = None,
+    intent_constraints: dict[str, Any] | None = None,
+    seed_tickers: list[str] | None = None,
 ) -> dict[str, Any]:
     timestamp = discovered_at or utc_now_iso()
     sources = requested_sources or DEFAULT_DISCOVERY_SOURCES
@@ -254,10 +263,22 @@ def discover_candidates(
     warnings: list[str] = []
     errors: list[str] = []
     candidates: list[dict[str, Any]] = []
+    external_diagnostics: dict[str, Any] = {}
 
     for source in sources:
         normalized = str(source or "").strip().lower()
-        if normalized == "manual_hotlist":
+        if normalized == "external_catalyst":
+            external_result = discover_external_catalyst_candidates(
+                max_tickers=max_count,
+                discovered_at=timestamp,
+                intent_constraints=intent_constraints or {},
+                seed_tickers=seed_tickers or [],
+            )
+            external_diagnostics = external_result
+            rows = external_result.get("candidates", [])
+            source_warnings = list(external_result.get("warnings", []))
+            errors.extend(str(item) for item in external_result.get("errors", []) if item)
+        elif normalized == "manual_hotlist":
             rows, source_warnings = discover_manual_hotlist_candidates(max_tickers=max_count, discovered_at=timestamp)
         elif normalized == "database_recent":
             rows, source_warnings = discover_database_recent_candidates(db_path=db_path, max_tickers=max_count, discovered_at=timestamp)
@@ -274,6 +295,8 @@ def discover_candidates(
 
     merged = _merge_candidates(candidates, max_count)
     tickers = [candidate["ticker"] for candidate in merged]
+    catalyst_sources_used = unique_texts([source for candidate in merged for source in candidate.get("external_sources", [])])
+    catalyst_types = unique_texts([catalyst for candidate in merged for catalyst in candidate.get("catalyst_types", [])])
     return {
         "ok": True,
         "discovery_version": DISCOVERY_VERSION,
@@ -286,6 +309,22 @@ def discover_candidates(
         "discovered_count": len(tickers),
         "warnings": unique_texts(warnings),
         "errors": unique_texts(errors),
+        "external_discovery_used": bool(catalyst_sources_used),
+        "catalyst_sources_used": catalyst_sources_used,
+        "catalyst_types": catalyst_types,
+        "external_discovery": {
+            key: external_diagnostics.get(key)
+            for key in (
+                "external_discovery_version",
+                "providers_attempted",
+                "providers_available",
+                "provider_statuses",
+                "catalyst_types",
+                "warnings",
+                "errors",
+            )
+            if key in external_diagnostics
+        },
         "point_in_time_safe": all(bool(candidate.get("point_in_time_safe", True)) for candidate in merged),
         "requires_live_validation": True,
         "discovery_used": False,

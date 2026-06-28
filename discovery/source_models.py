@@ -56,6 +56,27 @@ def _compact_candidate(row: dict[str, Any]) -> dict[str, Any]:
         compact["sources"] = unique_texts(sources)
     else:
         compact["source_type"] = str(source_type or "").strip() or None
+    catalyst_type = str(row.get("catalyst_type") or "").strip().lower()
+    if catalyst_type:
+        compact["catalyst_type"] = catalyst_type
+    catalyst_types = unique_texts(row.get("catalyst_types"))
+    if catalyst_types:
+        compact["catalyst_types"] = catalyst_types
+    external_sources = unique_texts(row.get("external_sources"))
+    if external_sources:
+        compact["external_sources"] = external_sources
+    headline = str(row.get("headline") or row.get("title") or "").strip()
+    if headline:
+        compact["headline"] = headline
+    if row.get("url"):
+        compact["url"] = row.get("url")
+    if row.get("published_at"):
+        compact["published_at"] = row.get("published_at")
+    if row.get("as_of"):
+        compact["as_of"] = row.get("as_of")
+    confidence = row.get("confidence")
+    if confidence is not None:
+        compact["confidence"] = max(0.0, min(1.0, safe_float(confidence)))
     return compact
 
 
@@ -74,15 +95,34 @@ def summarize_discovery_result(
     if not tickers:
         tickers = [str(item.get("ticker") or "").strip().upper() for item in candidates if str(item.get("ticker") or "").strip()]
     discovered_count = safe_int(payload.get("discovered_count"), len(tickers))
+    candidate_catalyst_types = [item.get("catalyst_type") for item in candidates]
+    candidate_catalyst_types.extend(
+        nested
+        for item in candidates
+        for nested in (item.get("catalyst_types") if isinstance(item.get("catalyst_types"), list) else [])
+    )
+    candidate_catalyst_sources = [
+        source
+        for item in candidates
+        for source in (item.get("external_sources") if isinstance(item.get("external_sources"), list) else [])
+    ]
+    if not candidate_catalyst_sources:
+        candidate_catalyst_sources = [item.get("source") for item in candidates if item.get("source_type") == "external_catalyst"]
+    catalyst_types = unique_texts(payload.get("catalyst_types") or candidate_catalyst_types)
+    catalyst_sources = unique_texts(payload.get("catalyst_sources_used") or candidate_catalyst_sources)
     return {
         "discovery_used": bool(payload.get("discovery_used", False)),
+        "external_discovery_used": bool(payload.get("external_discovery_used") or catalyst_sources),
         "discovered_count": discovered_count,
         "sources_used": unique_texts(payload.get("sources_used")),
         "requested_sources": unique_texts(payload.get("requested_sources")),
+        "catalyst_sources_used": catalyst_sources,
+        "catalyst_types": catalyst_types,
         "tickers": tickers[: MAX_DISCOVERED_TICKERS],
         "top_candidates": [_compact_candidate(row) for row in candidates[: max(1, top_limit)]],
         "warnings": unique_texts(payload.get("warnings")),
         "errors": unique_texts(payload.get("errors")),
+        "external_discovery": payload.get("external_discovery") if isinstance(payload.get("external_discovery"), dict) else {},
         "fallback_used": bool(payload.get("fallback_used", False)),
         "bypass_reason": payload.get("bypass_reason"),
         "point_in_time_safe": bool(payload.get("point_in_time_safe", True)),
