@@ -4,6 +4,8 @@ import { WarningBox } from "@/components/WarningBox";
 import { fmt } from "@/lib/format";
 import {
   AssistantTradeResponse,
+  DiscoveryCandidateSummary,
+  DiscoverySummary,
   NormalizedChatResponse,
   OptionIdeaRow,
   ResearchSource,
@@ -172,6 +174,134 @@ function TextList({ title, items }: { title: string; items: string[] }) {
   );
 }
 
+function readableDiscoveryReason(value: string | null | undefined): string {
+  const text = String(value || "").trim().replace(/_/g, " ");
+  return text || "not used";
+}
+
+function hasDiscoveryDetails(discovery: DiscoverySummary | undefined): discovery is DiscoverySummary {
+  if (!discovery) return false;
+  return Boolean(
+    discovery.discovery_used ||
+    discovery.fallback_used ||
+    discovery.bypass_reason ||
+    (discovery.discovered_count ?? 0) > 0 ||
+    discovery.sources_used.length ||
+    discovery.requested_sources.length ||
+    discovery.tickers.length ||
+    discovery.top_candidates.length ||
+    discovery.warnings.length ||
+    discovery.errors.length
+  );
+}
+
+function candidateSourceLabel(candidate: DiscoveryCandidateSummary): string {
+  if (candidate.sources.length) return candidate.sources.join(", ");
+  return fmt(candidate.source_type, "source unknown");
+}
+
+function candidateReason(candidate: DiscoveryCandidateSummary): string {
+  return fmt(candidate.reason_discovered || candidate.reasons[0], "No discovery reason attached.");
+}
+
+function DiscoveryCandidateCard({ candidate }: { candidate: DiscoveryCandidateSummary }) {
+  return (
+    <article className="rounded-2xl border border-stone-200 bg-white/75 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-xs font-black uppercase tracking-[0.18em] text-stone-500">Candidate</div>
+          <h4 className="mt-1 text-xl font-black text-ink">{fmt(candidate.ticker, "UNKNOWN")}</h4>
+        </div>
+        <Badge tone="neutral">Discovery score only: {fmt(candidate.discovery_score)}</Badge>
+      </div>
+      <div className="mt-3 grid gap-2 text-sm text-stone-700 sm:grid-cols-2">
+        <div>
+          <span className="font-black text-stone-800">Source:</span> {candidateSourceLabel(candidate)}
+        </div>
+        <div>
+          <span className="font-black text-stone-800">Requires live validation:</span> {fmt(candidate.requires_live_validation, "Unknown")}
+        </div>
+      </div>
+      <p className="mt-3 text-sm leading-6 text-stone-700">
+        <span className="font-black text-stone-800">Reason:</span> {candidateReason(candidate)}
+      </p>
+    </article>
+  );
+}
+
+function DiscoveryDiagnostics({ discovery }: { discovery?: DiscoverySummary }) {
+  if (!hasDiscoveryDetails(discovery)) return null;
+  const discoveredCount = discovery.discovered_count ?? discovery.tickers.length;
+  const topCandidates = discovery.top_candidates.filter((candidate) => candidate.ticker).slice(0, 5);
+  const tickers = discovery.tickers.slice(0, 16);
+  return (
+    <section className="rounded-3xl border border-sky-200 bg-sky-50/70 p-4 text-sky-950">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h4 className="text-lg font-black text-ink">Discovery</h4>
+          <p className="mt-1 text-sm leading-6">
+            {discovery.discovery_used
+              ? `Used discovery to choose ${fmt(discoveredCount, "0")} tickers for live validation.`
+              : `Discovery skipped: ${readableDiscoveryReason(discovery.bypass_reason)}.`}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {discovery.discovery_used ? <Badge tone="research">{fmt(discoveredCount, "0")} discovered</Badge> : <Badge tone="neutral">Not used</Badge>}
+          {discovery.requires_live_validation ? <Badge tone="warning">Requires live validation</Badge> : null}
+          {discovery.point_in_time_safe === false ? <Badge tone="warning">Point-in-time warning</Badge> : <Badge tone="neutral">Point-in-time safe</Badge>}
+        </div>
+      </div>
+
+      {discovery.fallback_used ? (
+        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-950">
+          Discovery fallback used: combined universe fallback was used before live validation.
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        {discovery.sources_used.length ? (
+          <div className="rounded-2xl bg-white/70 p-3">
+            <div className="text-xs font-black uppercase tracking-[0.18em] text-stone-500">Sources used</div>
+            <p className="mt-1 text-sm font-semibold text-stone-700">{discovery.sources_used.join(", ")}</p>
+          </div>
+        ) : null}
+        {discovery.requested_sources.length ? (
+          <div className="rounded-2xl bg-white/70 p-3">
+            <div className="text-xs font-black uppercase tracking-[0.18em] text-stone-500">Requested sources</div>
+            <p className="mt-1 text-sm font-semibold text-stone-700">{discovery.requested_sources.join(", ")}</p>
+          </div>
+        ) : null}
+      </div>
+
+      {tickers.length ? (
+        <div className="mt-4">
+          <div className="text-xs font-black uppercase tracking-[0.18em] text-stone-500">Tickers sent to validation</div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {tickers.map((ticker) => <Badge key={ticker} tone="neutral">{ticker}</Badge>)}
+            {discovery.tickers.length > tickers.length ? <Badge tone="neutral">+{discovery.tickers.length - tickers.length} more</Badge> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {topCandidates.length ? (
+        <div className="mt-4">
+          <div className="mb-2 text-xs font-black uppercase tracking-[0.18em] text-stone-500">Top discovery candidates</div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            {topCandidates.map((candidate) => (
+              <DiscoveryCandidateCard key={`${candidate.ticker}:${candidateSourceLabel(candidate)}`} candidate={candidate} />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <TextList title="Discovery warnings" items={discovery.warnings} />
+        <TextList title="Discovery errors" items={discovery.errors} />
+      </div>
+    </section>
+  );
+}
+
 export function ResultSummary({ assistant }: { assistant: AssistantTradeResponse }) {
   const showOptions = optionsRequested(assistant);
   const eligibleRows = assistant.paper_eligible.length
@@ -305,7 +435,10 @@ export function AssistantResultPanel({
 
       <section className="rounded-3xl border border-stone-200 bg-white/50 p-4">
         <h3 className="mb-3 text-lg font-black">Advanced diagnostics</h3>
-        <JsonPanel title="Raw backend payload" data={raw ?? response?.raw} />
+        <div className="space-y-4">
+          <DiscoveryDiagnostics discovery={assistant.market_state.discovery_summary} />
+          <JsonPanel title="Raw backend payload" data={raw ?? response?.raw} />
+        </div>
       </section>
     </div>
   );

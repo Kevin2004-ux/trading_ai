@@ -7,11 +7,41 @@ export interface ResearchSource {
   sourceId?: string | number;
 }
 
+export interface DiscoveryCandidateSummary {
+  ticker: string;
+  discovery_score?: number | null;
+  sources: string[];
+  source_type?: string | null;
+  reasons: string[];
+  reason_discovered?: string | null;
+  requires_live_validation?: boolean;
+  point_in_time_safe?: boolean;
+}
+
+export interface DiscoverySummary {
+  discovery_used?: boolean;
+  discovered_count?: number | null;
+  sources_used: string[];
+  requested_sources: string[];
+  tickers: string[];
+  top_candidates: DiscoveryCandidateSummary[];
+  warnings: string[];
+  errors: string[];
+  fallback_used?: boolean;
+  bypass_reason?: string | null;
+  point_in_time_safe?: boolean;
+  requires_live_validation?: boolean;
+}
+
 export interface MarketState {
   provider_status?: string;
   market_regime?: unknown;
   data_freshness?: unknown;
   partial_results?: boolean;
+  discovery_used?: boolean;
+  discovered_count?: number | null;
+  sources_used?: string[];
+  discovery_summary?: DiscoverySummary;
   message?: string | null;
 }
 
@@ -145,6 +175,7 @@ export interface BestAvailableIdeas {
   paper_trading_only?: boolean;
   summary?: string;
   ranking_status?: string;
+  discovery_summary?: DiscoverySummary;
   option_discovery_status?: string;
   options_final_eligibility?: boolean;
   paper_eligible?: UnknownRecord[];
@@ -344,6 +375,57 @@ function normalizeUnderlying(row: UnknownRecord, fallbackRank?: number): OptionU
   };
 }
 
+function normalizeTickerList(value: unknown): string[] {
+  return stringList(value).map((ticker) => ticker.toUpperCase());
+}
+
+function normalizeDiscoveryCandidate(row: UnknownRecord): DiscoveryCandidateSummary {
+  return {
+    ticker: String(row.ticker ?? "").trim().toUpperCase(),
+    discovery_score: numberOrNull(row.discovery_score),
+    sources: stringList(row.sources),
+    source_type: textOrNull(row.source_type),
+    reasons: stringList(row.reasons),
+    reason_discovered: textOrNull(row.reason_discovered),
+    requires_live_validation: typeof row.requires_live_validation === "boolean" ? row.requires_live_validation : undefined,
+    point_in_time_safe: typeof row.point_in_time_safe === "boolean" ? row.point_in_time_safe : undefined
+  };
+}
+
+function normalizeDiscoverySummary(value: unknown): DiscoverySummary | undefined {
+  const row = recordOf(value);
+  if (!Object.keys(row).length) return undefined;
+  return {
+    discovery_used: typeof row.discovery_used === "boolean" ? row.discovery_used : Boolean(row.discovery_used),
+    discovered_count: numberOrNull(row.discovered_count),
+    sources_used: stringList(row.sources_used),
+    requested_sources: stringList(row.requested_sources),
+    tickers: normalizeTickerList(row.tickers),
+    top_candidates: arrayOfRecords(row.top_candidates).map(normalizeDiscoveryCandidate),
+    warnings: stringList(row.warnings),
+    errors: stringList(row.errors),
+    fallback_used: typeof row.fallback_used === "boolean" ? row.fallback_used : Boolean(row.fallback_used),
+    bypass_reason: textOrNull(row.bypass_reason),
+    point_in_time_safe: typeof row.point_in_time_safe === "boolean" ? row.point_in_time_safe : undefined,
+    requires_live_validation: typeof row.requires_live_validation === "boolean" ? row.requires_live_validation : undefined
+  };
+}
+
+function normalizeMarketState(value: unknown): MarketState {
+  const row = recordOf(value);
+  const discovery = normalizeDiscoverySummary(row.discovery_summary);
+  return {
+    ...row,
+    provider_status: textOrNull(row.provider_status) || undefined,
+    partial_results: typeof row.partial_results === "boolean" ? row.partial_results : undefined,
+    discovery_used: typeof row.discovery_used === "boolean" ? row.discovery_used : discovery?.discovery_used,
+    discovered_count: numberOrNull(row.discovered_count) ?? discovery?.discovered_count,
+    sources_used: stringList(row.sources_used),
+    discovery_summary: discovery,
+    message: textOrNull(row.message)
+  };
+}
+
 export function normalizeAssistantResponse(payload: unknown): AssistantTradeResponse {
   const root = recordOf(payload);
   const scanSummary = recordOf(root.scan_summary);
@@ -360,7 +442,7 @@ export function normalizeAssistantResponse(payload: unknown): AssistantTradeResp
     research_sources: sanitizeSources(root.research_sources),
     research_warnings: stringList(root.research_warnings),
     requested_instrument: textOrNull(root.requested_instrument) || undefined,
-    market_state: recordOf(root.market_state),
+    market_state: normalizeMarketState(root.market_state),
     top_stocks: topStocks,
     top_options: topOptions,
     option_underlying_watchlist: underlyings,
@@ -423,6 +505,7 @@ export function normalizeChatResponse(payload: unknown): NormalizedChatResponse 
 
 function buildAssistantFromBestIdeas(root: UnknownRecord): UnknownRecord {
   const best = recordOf(root.best_available_ideas);
+  const discovery = normalizeDiscoverySummary(root.discovery_summary ?? best.discovery_summary);
   return {
     ok: root.ok,
     paper_trading_only: root.paper_trading_only,
@@ -443,6 +526,10 @@ function buildAssistantFromBestIdeas(root: UnknownRecord): UnknownRecord {
     research_sources: [],
     market_state: {
       provider_status: best.ranking_status === "unavailable" ? "unavailable" : "unknown",
+      discovery_used: discovery?.discovery_used,
+      discovered_count: discovery?.discovered_count,
+      sources_used: discovery?.sources_used,
+      discovery_summary: discovery,
       message: best.ranking_status === "unavailable" ? "Ranking unavailable because usable market data was not returned." : null
     },
     scan_summary: recordOf(root.summary),
