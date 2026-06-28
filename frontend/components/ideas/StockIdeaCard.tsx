@@ -33,10 +33,19 @@ function TextList({ title, items }: { title: string; items: string[] }) {
 }
 
 export function StockIdeaCard({ idea, sources = [] }: { idea: StockIdeaRow; sources?: ResearchSource[] }) {
-  const blocked = ["blocked", "rejected", "failed"].some((token) => idea.status.toLowerCase().includes(token));
-  const watchlist = idea.status.toLowerCase().includes("watch");
+  const normalizedStatus = idea.status.toLowerCase();
+  const blocked = ["blocked", "rejected", "failed"].some((token) => normalizedStatus.includes(token));
+  const watchlist = normalizedStatus.includes("watch");
+  const researchOnly = normalizedStatus.includes("research");
+  const statusClass = blocked
+    ? "border-red-200"
+    : watchlist
+      ? "border-amber-200"
+      : researchOnly
+        ? "border-sky-200"
+        : "border-emerald-200";
   return (
-    <article className={`rounded-[1.6rem] border bg-white/80 p-5 shadow-card ${blocked ? "border-red-200" : watchlist ? "border-amber-200" : "border-emerald-200"}`}>
+    <article className={`rounded-[1.6rem] border bg-white/80 p-5 shadow-card ${statusClass}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-xs font-bold uppercase tracking-[0.2em] text-stone-500">Stock idea #{fmt(idea.rank)}</div>
@@ -54,9 +63,19 @@ export function StockIdeaCard({ idea, sources = [] }: { idea: StockIdeaRow; sour
         </div>
       </div>
 
-      {blocked || watchlist ? (
-        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/80 p-3 text-sm font-semibold text-amber-950">
-          {blocked ? "Blocked: backend constraints did not allow this as a paper trade." : "Watchlist only: monitor for confirmation before it can become paper eligible."}
+      {blocked || watchlist || researchOnly ? (
+        <div className={`mt-4 rounded-2xl border p-3 text-sm font-semibold ${blocked ? "border-red-200 bg-red-50 text-red-900" : researchOnly ? "border-sky-200 bg-sky-50 text-sky-950" : "border-amber-200 bg-amber-50/80 text-amber-950"}`}>
+          {blocked
+            ? "Blocked: backend constraints did not allow this as a paper trade."
+            : researchOnly
+              ? "Research only: useful context, but backend gates did not mark it paper eligible."
+              : "Watchlist: monitor for confirmation before it can become paper eligible."}
+        </div>
+      ) : null}
+
+      {idea.secondary_status_notes?.length ? (
+        <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50/80 p-3">
+          <TextList title="Also appeared as" items={idea.secondary_status_notes} />
         </div>
       ) : null}
 

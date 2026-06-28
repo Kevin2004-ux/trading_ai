@@ -57,6 +57,7 @@ export interface StockIdeaRow {
   current_risks: string[];
   research_uncertainties: string[];
   research_source_ids: Array<string | number>;
+  secondary_status_notes?: string[];
 }
 
 export interface OptionIdeaRow {
