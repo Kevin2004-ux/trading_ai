@@ -18,3 +18,4 @@ theme:
 # We are temporarily simplifying the navigation to only include the homepage.
 nav:
   - Home: index.md
+  - Build Roadmap: BUILD_ROADMAP.md
