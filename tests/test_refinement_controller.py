@@ -196,6 +196,36 @@ def test_execute_adaptive_scan_plan_runs_bounded_second_pass_and_consolidates(mo
     assert {"MSFT", "NVDA", "AMD"}.issubset(ranked)
 
 
+def test_adaptive_execution_stops_after_partial_legitimate_chat_pass(monkeypatch):
+    calls = []
+
+    def fake_execute_scan_plan(plan, runtime_context=None, db_path="strategy_library.db", internal_controls=None):
+        calls.append({"plan": dict(plan), "controls": dict(internal_controls or {})})
+        return _execution_result(
+            watchlist=[_stock_row("AAPL", score=76)],
+            partial=True,
+            data_missing=["MSFT timed out before the total scan timeout."],
+        )
+
+    monkeypatch.setattr(refinement, "execute_scan_plan", fake_execute_scan_plan)
+
+    result = execute_adaptive_scan_plan(
+        {"requested_instrument": "stocks", "universes": ["large_cap"], "max_tickers": 7, "max_candidates": 6, "refinement": {"max_passes": 3}},
+        provider="deterministic",
+        internal_controls={"stop_after_first_legitimate_pass": True, "chat_broad_scan": True},
+    )
+
+    assert len(calls) == 1
+    assert result["passes_executed"] == 1
+    assert result["refinement_used"] is False
+    assert "Legitimate ranked results found in the bounded first pass" in result["stop_reason"]
+    assert result["best_available_ideas"]["ranking_status"] == "available"
+    assert result["assistant_response"]["market_state"]["partial_results"] is True
+    assert result["assistant_response"]["top_stocks"][0]["ticker"] == "AAPL"
+    assert result["paper_trading_only"] is True
+    assert result["brokerage_execution_enabled"] is False
+
+
 def test_adaptive_execution_never_broadens_explicit_ticker_review(monkeypatch):
     calls = []
     monkeypatch.setattr(

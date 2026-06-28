@@ -4,6 +4,8 @@ import time
 
 import pytest
 
+from planning.policy_validator import POLICY_LIMITS
+
 
 FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
 HTTPX_AVAILABLE = importlib.util.find_spec("httpx") is not None
@@ -1250,6 +1252,53 @@ def test_api_chat_best_available_stock_ideas_trigger_deterministic_scan(monkeypa
     assert payload["assistant_response"]["top_options"] == []
     assert "Use the Scan, Trades, Performance" not in payload["answer"]
     assert payload["planner_status"] == "deterministic_planned"
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_broad_stock_scan_uses_bounded_chat_controls(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("CHAT_BROAD_SCAN_MAX_TICKERS", "7")
+    monkeypatch.setenv("CHAT_BROAD_SCAN_MAX_CANDIDATES", "6")
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="MSFT"))
+
+    response = client.post("/api/chat", json={"message": "Give me your best stocks"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["proposed_plan"]["max_tickers"] == 7
+    assert captured["proposed_plan"]["max_candidates"] == 6
+    assert captured["internal_controls"]["chat_broad_scan"] is True
+    assert captured["internal_controls"]["bounded_first_batch"] is True
+    assert captured["internal_controls"]["stop_after_first_legitimate_pass"] is True
+    assert captured["internal_controls"]["scan_total_timeout_seconds"] < 45.0
+    assert captured["include_options"] is False
+    assert payload["brokerage_execution_enabled"] is False
+    assert payload["paper_trading_only"] is True
+    assert POLICY_LIMITS["max_tickers"]["max"] == 500
+    assert POLICY_LIMITS["max_candidates"]["max"] == 100
+
+
+@pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
+def test_api_chat_broad_stock_scan_defaults_fit_bridge_timeout(monkeypatch):
+    captured = {}
+    monkeypatch.delenv("CHAT_BROAD_SCAN_MAX_TICKERS", raising=False)
+    monkeypatch.delenv("CHAT_BROAD_SCAN_MAX_CANDIDATES", raising=False)
+    monkeypatch.delenv("CHAT_SCAN_TOTAL_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("CHAT_SCAN_TICKER_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr("ui.app.get_model_init_error", lambda: "GEMINI_API_KEY is not configured.")
+    monkeypatch.setattr("ui.app.execute_adaptive_scan_plan", _fake_adaptive_execution(captured, ticker="MSFT"))
+
+    response = client.post("/api/chat", json={"message": "Give me your best stocks"})
+
+    assert response.status_code == 200
+    assert captured["proposed_plan"]["max_tickers"] == 6
+    assert captured["proposed_plan"]["max_candidates"] == 6
+    assert captured["internal_controls"]["scan_total_timeout_seconds"] <= 9.0
+    assert captured["internal_controls"]["scan_ticker_timeout_seconds"] <= 4.0
+    assert captured["internal_controls"]["scan_total_timeout_seconds"] < 45.0
+    assert response.json()["brokerage_execution_enabled"] is False
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")

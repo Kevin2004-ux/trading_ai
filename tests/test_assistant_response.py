@@ -280,11 +280,17 @@ def test_mixed_result_excludes_provider_failure_and_keeps_legitimate_rows():
     trading_result = {
         "ok": True,
         "scan_result": {
+            "scan_execution_summary": {
+                "partial_results_used": True,
+                "completed_tickers": 1,
+                "timed_out_tickers": ["BAD"],
+            },
             "rejected_candidates": [
                 _scanner_failure("BAD"),
                 _stock("AMD", status="rejected", score=74, failed_constraints=["price_above_sma_20"], rejection_reason="Price below SMA 20."),
             ]
         },
+        "summary": {"partial_results": True},
         "decision_result": {"final_recommendations": []},
     }
     best_ideas = build_best_available_ideas(trading_result, config={"include_options": False})
@@ -292,6 +298,7 @@ def test_mixed_result_excludes_provider_failure_and_keeps_legitimate_rows():
     response = build_assistant_trade_response(best_ideas, trading_result, requested_instrument="stocks")
 
     assert response["ranking_status"] == "available"
+    assert response["market_state"]["partial_results"] is True
     assert [row["ticker"] for row in response["top_stocks"]] == ["AMD"]
     assert "Price must reclaim SMA 20." in response["top_stocks"][0]["confirmation_needed"]
     assert any("IBKR/TWS is not reachable" in item for item in response["system_issues"])

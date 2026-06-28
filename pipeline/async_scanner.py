@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import inspect
 import os
@@ -45,10 +46,11 @@ def _merge_config(config: dict | None = None) -> dict:
     return merged
 
 
-async def _call_scan_fn(scan_fn: Callable, ticker: str) -> Any:
+async def _call_scan_fn(scan_fn: Callable, ticker: str, executor: ThreadPoolExecutor | None = None) -> Any:
     if inspect.iscoroutinefunction(scan_fn):
         return await scan_fn(ticker)
-    return await asyncio.to_thread(scan_fn, ticker)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, scan_fn, ticker)
 
 
 async def async_scan_tickers(
@@ -84,13 +86,18 @@ async def async_scan_tickers(
             "state": state.summary(),
         }
 
+    executor = None if inspect.iscoroutinefunction(scan_fn) else ThreadPoolExecutor(
+        max_workers=cfg["max_concurrency"],
+        thread_name_prefix="async-scanner",
+    )
+
     async def worker(ticker: str) -> dict:
         async with semaphore:
             state.mark_started(ticker)
             try:
                 async with rate_limiter.limit(provider_bucket):
                     payload = await asyncio.wait_for(
-                        _call_scan_fn(scan_fn, ticker),
+                        _call_scan_fn(scan_fn, ticker, executor),
                         timeout=cfg["ticker_timeout_seconds"],
                     )
                 state.mark_completed(ticker)
@@ -141,7 +148,7 @@ async def async_scan_tickers(
     if (timed_out or failed) and "Scan completed with partial results due to timeout or provider failures." not in warnings:
         warnings.append("Scan completed with partial results due to timeout or provider failures.")
 
-    return {
+    response = {
         "ok": completed_count > 0,
         "completed": completed,
         "timestamp": timestamp,
@@ -155,6 +162,9 @@ async def async_scan_tickers(
         "duration_seconds": round(time.monotonic() - started, 4),
         "state": state.summary(),
     }
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+    return response
 
 
 def run_async_scan_tickers(

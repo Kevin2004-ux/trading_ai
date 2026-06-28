@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from pipeline.async_scanner import async_scan_tickers
 from pipeline.rate_limiter import AsyncRateLimiter
@@ -75,6 +76,32 @@ def test_async_scanner_captures_ticker_timeout():
     assert result["results"][0]["error_type"] == "timeout"
 
 
+def test_async_scanner_sync_timeout_does_not_wait_for_blocked_thread():
+    def scan(ticker):
+        time.sleep(0.3)
+        return {"ticker": ticker}
+
+    started = time.monotonic()
+    result = asyncio.run(
+        async_scan_tickers(
+            ["AAPL"],
+            scan,
+            config={
+                "ticker_timeout_seconds": 0.01,
+                "total_timeout_seconds": 0.05,
+                "provider_bucket": "test_provider",
+                "rate_limiter": _fast_limiter(),
+            },
+        )
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert result["completed"] is False
+    assert result["timed_out_tickers"] == ["AAPL"]
+    assert result["results"][0]["error_type"] == "timeout"
+
+
 def test_async_scanner_total_timeout_returns_partial_results():
     async def scan(ticker):
         if ticker == "SLOW":
@@ -126,4 +153,3 @@ def test_async_scanner_respects_concurrency_limit():
 
     assert result["completed"] is True
     assert max_seen <= 2
-

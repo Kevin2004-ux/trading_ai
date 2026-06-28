@@ -71,6 +71,8 @@ from ui.api_bridge import run_blocking_backend_call  # noqa: E402
 
 DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS = 45.0
 CHAT_SCAN_TIMEOUT_WARNING = "Market data provider timed out. IBKR/TWS may be unavailable or blocked by a stale API session."
+DEFAULT_CHAT_BROAD_SCAN_MAX_TICKERS = 6
+DEFAULT_CHAT_BROAD_SCAN_MAX_CANDIDATES = 6
 
 
 def _load_optional_prediction_dossier() -> tuple[Callable | None, str | None]:
@@ -542,6 +544,14 @@ def _safe_timeout_env(name: str, default: float, minimum: float = 0.01, maximum:
     return max(minimum, min(value, maximum))
 
 
+def _safe_int_env(name: str, default: int, minimum: int = 1, maximum: int = 500) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def _chat_scan_timeout_seconds() -> float:
     return _safe_timeout_env("CHAT_SCAN_TIMEOUT_SECONDS", DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS)
 
@@ -550,13 +560,55 @@ def _planning_execution_timeout_seconds() -> float:
     return _safe_timeout_env("PLANNING_EXECUTION_TIMEOUT_SECONDS", max(DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS, 60.0))
 
 
-def _chat_scan_internal_controls(timeout_seconds: float) -> dict:
-    scan_total_timeout = max(0.01, timeout_seconds * 0.85)
-    ticker_timeout = max(0.01, min(10.0, scan_total_timeout / 3.0))
-    return {
+def _chat_broad_scan_max_tickers() -> int:
+    return _safe_int_env("CHAT_BROAD_SCAN_MAX_TICKERS", DEFAULT_CHAT_BROAD_SCAN_MAX_TICKERS, minimum=1, maximum=100)
+
+
+def _chat_broad_scan_max_candidates() -> int:
+    return _safe_int_env("CHAT_BROAD_SCAN_MAX_CANDIDATES", DEFAULT_CHAT_BROAD_SCAN_MAX_CANDIDATES, minimum=1, maximum=50)
+
+
+def _bounded_plan_count(value: object, cap: int) -> int:
+    try:
+        numeric = int(value) if value not in (None, "") else cap
+    except (TypeError, ValueError):
+        numeric = cap
+    return max(1, min(numeric, cap))
+
+
+def _chat_scan_internal_controls(timeout_seconds: float, *, broad_scan: bool = False) -> dict:
+    default_total_timeout = (
+        min(timeout_seconds * 0.2, max(0.01, timeout_seconds - 14.0))
+        if broad_scan
+        else min(timeout_seconds * 0.55, max(0.01, timeout_seconds - 8.0))
+    )
+    max_total_timeout = max(0.01, timeout_seconds * 0.95)
+    scan_total_timeout = _safe_timeout_env(
+        "CHAT_SCAN_TOTAL_TIMEOUT_SECONDS",
+        max(0.01, default_total_timeout),
+        minimum=0.01,
+        maximum=max_total_timeout,
+    )
+    default_ticker_timeout = min(4.0, scan_total_timeout) if broad_scan else min(8.0, scan_total_timeout / 4.0)
+    ticker_timeout = _safe_timeout_env(
+        "CHAT_SCAN_TICKER_TIMEOUT_SECONDS",
+        max(0.01, default_ticker_timeout),
+        minimum=0.01,
+        maximum=scan_total_timeout,
+    )
+    controls = {
         "scan_total_timeout_seconds": scan_total_timeout,
         "scan_ticker_timeout_seconds": ticker_timeout,
     }
+    if broad_scan:
+        controls.update(
+            {
+                "chat_broad_scan": True,
+                "bounded_first_batch": True,
+                "stop_after_first_legitimate_pass": True,
+            }
+        )
+    return controls
 
 
 def _safe_max_passes(plan: dict) -> int:
@@ -574,6 +626,8 @@ def _broad_trade_idea_plan(plan: dict) -> bool:
 def _prepare_chat_execution_plan(message: str, approved_plan: dict) -> dict:
     plan = dict(approved_plan or {})
     if _broad_trade_idea_plan(plan):
+        plan["max_tickers"] = _bounded_plan_count(plan.get("max_tickers"), _chat_broad_scan_max_tickers())
+        plan["max_candidates"] = _bounded_plan_count(plan.get("max_candidates"), _chat_broad_scan_max_candidates())
         refinement = dict(plan.get("refinement") or {})
         refinement["max_passes"] = max(2, _safe_max_passes(plan))
         plan["refinement"] = refinement
@@ -791,7 +845,10 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
     approved_plan = planner_result.get("approved_plan", {}) if isinstance(planner_result, dict) else {}
     execution_plan = _prepare_chat_execution_plan(message, approved_plan)
     use_adaptive = _should_use_adaptive_chat_execution(execution_plan)
-    internal_controls = _chat_scan_internal_controls(timeout_seconds or _chat_scan_timeout_seconds())
+    internal_controls = _chat_scan_internal_controls(
+        timeout_seconds or _chat_scan_timeout_seconds(),
+        broad_scan=_broad_trade_idea_plan(execution_plan),
+    )
     execution_result = (
         execute_adaptive_scan_plan(execution_plan, runtime_context={}, db_path=db_path, message=message, internal_controls=internal_controls)
         if use_adaptive

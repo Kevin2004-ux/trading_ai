@@ -637,8 +637,11 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
     blocked: list[dict] = []
     data_missing: list[str] = []
     system_issues: list[str] = []
+    partial_results = False
     for pass_result in passes:
         pass_number = _safe_int(pass_result.get("pass_number"), 1)
+        evaluation = _as_dict(pass_result.get("evaluation"))
+        partial_results = partial_results or bool(evaluation.get("partial_results"))
         best = _as_dict(_as_dict(pass_result.get("execution_result")).get("best_available_ideas"))
         paper.extend(_raw_with_source(row, pass_number) for row in _as_list(best.get("paper_eligible")) if isinstance(row, dict) and str(row.get("asset_type", "stock")).lower() != "option")
         watchlist.extend(_raw_with_source(row, pass_number) for row in _as_list(best.get("stock_watchlist")) if isinstance(row, dict))
@@ -668,6 +671,9 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
             "ok": True,
             "watchlist_candidates": watchlist,
             "rejected_candidates": blocked,
+            "scan_execution_summary": {
+                "partial_results_used": partial_results,
+            },
             "data_quality_summary": {
                 "warnings": _unique_texts(data_missing),
                 "errors": _unique_texts(system_issues),
@@ -678,7 +684,9 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
             "selected_count": len(paper),
             "logged_count": 0,
             "adaptive_consolidated": True,
+            "partial_results": partial_results,
         },
+        "partial_results": partial_results,
         "errors": [],
         "adaptive_data_missing": _unique_texts(data_missing),
         "adaptive_system_issues": _unique_texts(system_issues),
@@ -910,6 +918,9 @@ def execute_adaptive_scan_plan(
             break
         if evaluation.get("paper_eligible_count", 0) > 0:
             stop_reason = "At least one final paper-eligible idea passed strict gates; no further searching."
+            break
+        if controls.get("stop_after_first_legitimate_pass") and _safe_int(evaluation.get("legitimate_ranked_count"), 0) > 0:
+            stop_reason = "Legitimate ranked results found in the bounded first pass; no further chat broadening."
             break
         if evaluation.get("sufficient_results"):
             stop_reason = "Sufficient legitimate research results found."
