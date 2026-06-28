@@ -73,6 +73,7 @@ DEFAULT_CHAT_SCAN_TIMEOUT_SECONDS = 45.0
 CHAT_SCAN_TIMEOUT_WARNING = "Market data provider timed out. IBKR/TWS may be unavailable or blocked by a stale API session."
 DEFAULT_CHAT_BROAD_SCAN_MAX_TICKERS = 6
 DEFAULT_CHAT_BROAD_SCAN_MAX_CANDIDATES = 6
+DEFAULT_CHAT_DISCOVERY_SOURCES = ["manual_hotlist", "database_recent", "liquid_fallback"]
 
 
 def _load_optional_prediction_dossier() -> tuple[Callable | None, str | None]:
@@ -606,6 +607,9 @@ def _chat_scan_internal_controls(timeout_seconds: float, *, broad_scan: bool = F
                 "chat_broad_scan": True,
                 "bounded_first_batch": True,
                 "stop_after_first_legitimate_pass": True,
+                "use_dynamic_discovery": True,
+                "max_discovered_tickers": _chat_broad_scan_max_tickers(),
+                "discovery_sources": DEFAULT_CHAT_DISCOVERY_SOURCES,
             }
         )
     return controls
@@ -856,6 +860,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
     )
     best_ideas = execution_result.get("best_available_ideas") if isinstance(execution_result, dict) else {}
     assistant_response = execution_result.get("assistant_response") if isinstance(execution_result, dict) else {}
+    discovery_result = execution_result.get("discovery_result") if isinstance(execution_result, dict) else {}
     trading_result = (
         execution_result.get("consolidated_result", {})
         if use_adaptive and isinstance(execution_result, dict)
@@ -865,6 +870,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
         "planner": planner_result,
         "scan_result": execution_result,
         "trading_result": trading_result,
+        "discovery_result": discovery_result,
         "best_available_ideas": best_ideas,
         "assistant_response": assistant_response,
         "formatted_best_ideas_summary": execution_result.get("formatted_response") or format_best_ideas_response(assistant_response),
@@ -886,6 +892,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
                 "passes_executed": execution_result.get("passes_executed"),
                 "stop_reason": execution_result.get("stop_reason"),
                 "refinement_used": execution_result.get("refinement_used"),
+                "discovery_result": discovery_result,
             }
             if use_adaptive and isinstance(execution_result, dict)
             else execution_result.get("execution_summary", {}) if isinstance(execution_result, dict) else {}
@@ -984,6 +991,7 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
             "assistant_response": assistant_response,
             "scan_result": best_ideas_payload["scan_result"],
             "trading_result": best_ideas_payload["trading_result"],
+            "discovery_result": best_ideas_payload.get("discovery_result", {}),
             "formatted_best_ideas_summary": answer,
             "planner": planner_result,
             "planner_provider": planner_result.get("provider"),
@@ -1012,6 +1020,7 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
                 "planner_provider": planner_result.get("provider"),
                 "approved_plan": best_ideas_payload["approved_plan"],
                 "execution_summary": best_ideas_payload["execution_summary"],
+                "discovery_result": best_ideas_payload.get("discovery_result", {}),
                 "refinement_used": bool(best_ideas_payload.get("refinement_used")),
                 "passes_executed": int(best_ideas_payload.get("passes_executed") or 1),
                 "refinement_stop_reason": best_ideas_payload.get("refinement_stop_reason") or "",

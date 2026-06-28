@@ -152,6 +152,128 @@ def test_stock_only_execution_passes_no_options_and_auto_log_false(monkeypatch):
     assert result["option_discovery"]["status"] == "disabled"
 
 
+def test_broad_plan_with_dynamic_discovery_uses_discovered_tickers(monkeypatch):
+    captured = {}
+
+    def fake_discover_candidates(**kwargs):
+        captured["discovery_kwargs"] = kwargs
+        return {
+            "ok": True,
+            "discovery_version": "candidate_discovery_v1",
+            "discovered_at": "2026-06-28T12:00:00+00:00",
+            "as_of": "2026-06-28T12:00:00+00:00",
+            "requested_sources": kwargs.get("requested_sources", []),
+            "sources_used": ["manual_hotlist"],
+            "candidates": [
+                {"ticker": "MSFT", "source_type": "manual_hotlist", "discovery_score": 98, "requires_live_validation": True},
+                {"ticker": "NVDA", "source_type": "manual_hotlist", "discovery_score": 97, "requires_live_validation": True},
+            ],
+            "tickers": ["MSFT", "NVDA"],
+            "discovered_count": 2,
+            "warnings": [],
+            "errors": [],
+            "point_in_time_safe": True,
+            "requires_live_validation": True,
+        }
+
+    def fake_run_weekly_trade_hunt(**kwargs):
+        captured["run_kwargs"] = kwargs
+        return _fake_trading_result()
+
+    monkeypatch.setattr("planning.plan_executor.discover_candidates", fake_discover_candidates)
+    monkeypatch.setattr("planning.plan_executor.run_weekly_trade_hunt", fake_run_weekly_trade_hunt)
+
+    result = execute_scan_plan(
+        {"requested_instrument": "stocks", "objective": "best_ideas", "universes": ["large_cap"], "max_tickers": 10},
+        internal_controls={
+            "use_dynamic_discovery": True,
+            "max_discovered_tickers": 2,
+            "discovery_sources": ["manual_hotlist"],
+        },
+    )
+
+    assert result["ok"] is True
+    assert captured["discovery_kwargs"]["max_tickers"] == 2
+    assert captured["run_kwargs"]["tickers"] == ["MSFT", "NVDA"]
+    assert captured["run_kwargs"]["auto_log"] is False
+    assert result["paper_trading_only"] is True
+    assert result["brokerage_execution_enabled"] is False
+    assert result["universe_result"]["source"] == "dynamic_discovery"
+    assert result["discovery_result"]["discovered_count"] == 2
+    assert result["execution_summary"]["ticker_count_executed"] == 2
+    assert result["execution_summary"]["discovery_used"] is True
+
+
+def test_custom_ticker_plan_bypasses_dynamic_discovery(monkeypatch):
+    captured = {"discover_called": False}
+
+    def fake_discover_candidates(**kwargs):
+        captured["discover_called"] = True
+        return {"ok": True, "tickers": ["MSFT"], "discovered_count": 1, "warnings": [], "errors": []}
+
+    def fake_run_weekly_trade_hunt(**kwargs):
+        captured["run_kwargs"] = kwargs
+        return _fake_trading_result()
+
+    monkeypatch.setattr("planning.plan_executor.discover_candidates", fake_discover_candidates)
+    monkeypatch.setattr("planning.plan_executor.run_weekly_trade_hunt", fake_run_weekly_trade_hunt)
+
+    result = execute_scan_plan(
+        {
+            "requested_instrument": "stocks",
+            "objective": "ticker_review",
+            "universes": ["custom"],
+            "custom_tickers": ["AAPL"],
+            "max_tickers": 1,
+        },
+        internal_controls={"use_dynamic_discovery": True, "max_discovered_tickers": 5},
+    )
+
+    assert captured["discover_called"] is False
+    assert captured["run_kwargs"]["tickers"] == ["AAPL"]
+    assert result["universe_result"]["source"] == "scan_plan_combined"
+    assert result["execution_summary"]["ticker_count_executed"] == 1
+
+
+def test_empty_dynamic_discovery_falls_back_to_combined_universe(monkeypatch):
+    captured = {}
+
+    def fake_discover_candidates(**kwargs):
+        return {
+            "ok": True,
+            "discovery_version": "candidate_discovery_v1",
+            "discovered_at": "2026-06-28T12:00:00+00:00",
+            "as_of": "2026-06-28T12:00:00+00:00",
+            "requested_sources": kwargs.get("requested_sources", []),
+            "sources_used": [],
+            "candidates": [],
+            "tickers": [],
+            "discovered_count": 0,
+            "warnings": ["No discovery candidates available."],
+            "errors": [],
+            "point_in_time_safe": True,
+            "requires_live_validation": True,
+        }
+
+    def fake_run_weekly_trade_hunt(**kwargs):
+        captured["run_kwargs"] = kwargs
+        return _fake_trading_result()
+
+    monkeypatch.setattr("planning.plan_executor.discover_candidates", fake_discover_candidates)
+    monkeypatch.setattr("planning.plan_executor.run_weekly_trade_hunt", fake_run_weekly_trade_hunt)
+
+    result = execute_scan_plan(
+        {"requested_instrument": "stocks", "objective": "best_ideas", "universes": ["large_cap"], "max_tickers": 3},
+        internal_controls={"use_dynamic_discovery": True, "max_discovered_tickers": 3},
+    )
+
+    assert captured["run_kwargs"]["tickers"] == ["AAPL", "MSFT", "NVDA"]
+    assert result["universe_result"]["source"] == "scan_plan_combined"
+    assert result["discovery_result"]["discovered_count"] == 0
+    assert any("falling back" in warning.lower() for warning in result["warnings"])
+    assert result["execution_summary"]["auto_log"] is False
+
+
 def test_options_execution_not_ready_keeps_final_option_eligibility_false(monkeypatch):
     captured = {}
 

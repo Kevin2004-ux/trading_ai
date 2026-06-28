@@ -1108,6 +1108,7 @@ def test_api_chat_route_returns_structured_assistant_response(monkeypatch):
     assert payload["planner"]["intent"]["objective"] == "ticker_review"
     assert captured["proposed_plan"]["custom_tickers"] == ["AAPL"]
     assert captured["internal_controls"]["scan_total_timeout_seconds"] <= 45.0
+    assert "use_dynamic_discovery" not in captured["internal_controls"]
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
@@ -1272,6 +1273,9 @@ def test_api_chat_broad_stock_scan_uses_bounded_chat_controls(monkeypatch):
     assert captured["internal_controls"]["chat_broad_scan"] is True
     assert captured["internal_controls"]["bounded_first_batch"] is True
     assert captured["internal_controls"]["stop_after_first_legitimate_pass"] is True
+    assert captured["internal_controls"]["use_dynamic_discovery"] is True
+    assert captured["internal_controls"]["max_discovered_tickers"] == 7
+    assert captured["internal_controls"]["discovery_sources"] == ["manual_hotlist", "database_recent", "liquid_fallback"]
     assert captured["internal_controls"]["scan_total_timeout_seconds"] < 45.0
     assert captured["include_options"] is False
     assert payload["brokerage_execution_enabled"] is False
@@ -1295,6 +1299,8 @@ def test_api_chat_broad_stock_scan_defaults_fit_bridge_timeout(monkeypatch):
     assert response.status_code == 200
     assert captured["proposed_plan"]["max_tickers"] == 6
     assert captured["proposed_plan"]["max_candidates"] == 6
+    assert captured["internal_controls"]["use_dynamic_discovery"] is True
+    assert captured["internal_controls"]["max_discovered_tickers"] == 6
     assert captured["internal_controls"]["scan_total_timeout_seconds"] <= 9.0
     assert captured["internal_controls"]["scan_ticker_timeout_seconds"] <= 4.0
     assert captured["internal_controls"]["scan_total_timeout_seconds"] < 45.0

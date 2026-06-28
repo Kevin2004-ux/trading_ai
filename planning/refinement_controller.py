@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 
+from discovery import empty_discovery_result
 from ideas import build_assistant_trade_response, build_best_available_ideas, format_best_ideas_response
 from learning import active_policy_defaults, record_adaptive_research_execution
 from research.research_orchestrator import build_current_research, empty_research_response, scopes_from_research_preferences
@@ -118,6 +119,7 @@ def _base_response(policy_validation: dict, root_run_id: str) -> dict:
         "refinement_used": False,
         "refinement_provider": "none",
         "passes": [],
+        "discovery_result": empty_discovery_result(),
         "consolidated_result": {},
         "best_available_ideas": {},
         "assistant_response": {},
@@ -732,6 +734,14 @@ def _run_final_research(approved_plan: dict, assistant_response: dict, root_run_
     return build_current_research(tickers, scopes=scopes, candidate_context=context, request_id=root_run_id)
 
 
+def _first_pass_discovery_result(passes: list[dict]) -> dict:
+    for pass_result in passes:
+        discovery = _as_dict(_as_dict(pass_result.get("execution_result")).get("discovery_result"))
+        if discovery:
+            return discovery
+    return empty_discovery_result()
+
+
 def _finalize_consolidated_response(
     *,
     passes: list[dict],
@@ -969,6 +979,7 @@ def execute_adaptive_scan_plan(
     response["refinement_provider"] = refinement_provider if refinement_used else "none"
     response["stop_reason"] = stop_reason or "Adaptive execution completed."
     if response["passes"]:
+        response["discovery_result"] = _first_pass_discovery_result(response["passes"])
         consolidated, best, assistant, research, formatted = _finalize_consolidated_response(
             passes=response["passes"],
             approved_plan=initial_approved,
