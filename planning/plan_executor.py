@@ -14,6 +14,7 @@ from discovery import (
 )
 from ideas import build_assistant_trade_response, build_best_available_ideas, format_best_ideas_response
 from learning import active_policy_defaults, record_research_execution
+from providers.capabilities import configured_provider_capabilities, summarize_provider_capabilities
 from research.research_orchestrator import build_current_research, empty_research_response, scopes_from_research_preferences
 from scanner.options_discovery import discover_option_ideas, empty_option_discovery_response
 from scanner.universe_builder import get_default_universe, validate_ticker_universe
@@ -62,6 +63,7 @@ def _empty_execution_summary() -> dict:
         "auto_log": False,
         "effective_direction": "long",
         "unapplied_preferences": [],
+        "provider_capabilities": configured_provider_capabilities(),
     }
 
 
@@ -99,6 +101,7 @@ def _base_response(
         "universe_result": _empty_universe_result(),
         "discovery_result": empty_discovery_result(),
         "discovery_summary": summarize_discovery_result(empty_discovery_result()),
+        "provider_capabilities": configured_provider_capabilities(),
         "execution_summary": _empty_execution_summary(),
         "trading_result": {},
         "option_discovery": empty_option_discovery_response(requested=False, reason="Option discovery was not requested."),
@@ -558,6 +561,9 @@ def execute_scan_plan(
     response["trading_result"] = trading_result if isinstance(trading_result, dict) else {}
     response["trading_result"]["discovery_result"] = discovery_result
     response["trading_result"]["discovery_summary"] = response["discovery_summary"]
+    provider_capabilities = summarize_provider_capabilities(response["trading_result"])
+    response["provider_capabilities"] = provider_capabilities
+    response["trading_result"]["provider_capabilities"] = provider_capabilities
 
     opportunity_weights = _as_dict(execution_config.get("opportunity_weights")) or _as_dict(_as_dict(active_policy.get("policy")).get("stock_opportunity_weights"))
     stock_only_best_ideas = build_best_available_ideas(
@@ -603,6 +609,7 @@ def execute_scan_plan(
         requested_instrument=approved_plan.get("requested_instrument", "auto"),
         run_id=run_id,
     )
+    assistant_response.setdefault("market_state", {})["provider_capabilities"] = provider_capabilities
     assistant_response.setdefault("scan_summary", {})["active_policy_version"] = response["active_policy_version"]
     research = (
         _run_current_research_if_requested(approved_plan, assistant_response, run_id, warnings)
@@ -621,6 +628,7 @@ def execute_scan_plan(
         run_id=run_id,
         research=research,
     )
+    assistant_response.setdefault("market_state", {})["provider_capabilities"] = provider_capabilities
     assistant_response.setdefault("scan_summary", {})["active_policy_version"] = response["active_policy_version"]
     assistant_response.setdefault("scan_summary", {})["active_policy_fingerprint"] = response["active_policy_fingerprint"]
     formatted = format_best_ideas_response(assistant_response)
@@ -660,6 +668,7 @@ def execute_scan_plan(
             "unapplied_preferences": unapplied,
             "discovery_used": universe_result.get("source") == "dynamic_discovery",
             "discovery_summary": response["discovery_summary"],
+            "provider_capabilities": provider_capabilities,
         }
     )
     response["warnings"] = list(dict.fromkeys(str(item) for item in warnings if item))

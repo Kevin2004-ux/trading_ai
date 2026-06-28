@@ -8,6 +8,11 @@ import sqlite3
 from analytics.timeframe_confirmation import evaluate_timeframe_confirmation
 from analytics.volume_profile import evaluate_volume_profile_confirmation
 from engine.constraint_engine import evaluate_stock_constraints
+from features import (
+    build_core_market_feature_provenance,
+    provenance_warning_messages,
+    summarize_feature_provenance,
+)
 from pipeline.async_scanner import run_async_scan_tickers
 from quality.data_quality import build_data_quality_summary, validate_market_data_quality
 from realtime.market_data import get_market_snapshot
@@ -574,6 +579,8 @@ def build_stock_candidate(
     if current_price is None:
         current_price = _safe_float(technical_snapshot.get("current_price"))
 
+    feature_provenance = build_core_market_feature_provenance(ticker, market_snapshot, data_quality=data_quality)
+    provenance_warnings = provenance_warning_messages(feature_provenance)
     candidate = {
         "ticker": ticker.upper(),
         "asset_type": cfg["asset_type"],
@@ -607,6 +614,9 @@ def build_stock_candidate(
         "data_quality": data_quality,
         "price_source": data_quality.get("price_source"),
         "quote_status": data_quality.get("quote_status"),
+        "feature_provenance": feature_provenance,
+        "feature_provenance_summary": summarize_feature_provenance(feature_provenance),
+        "provenance_warnings": provenance_warnings,
     }
     return candidate
 
@@ -755,6 +765,7 @@ def _candidate_metrics(candidate: dict) -> dict:
         "data_quality_label": candidate.get("data_quality", {}).get("quality_label") if isinstance(candidate.get("data_quality"), dict) else None,
         "price_source": candidate.get("price_source"),
         "quote_status": candidate.get("quote_status"),
+        "feature_provenance_summary": candidate.get("feature_provenance_summary"),
         "technical_confirmation_summary": candidate.get("technical_confirmation_summary"),
         "volume_profile_confirmation": candidate.get("volume_profile_confirmation"),
         "timeframe_confirmation": candidate.get("timeframe_confirmation"),
@@ -853,6 +864,9 @@ def scan_swing_candidates(
             reason = market_snapshot.get("error", "Market data request failed.")
             rejected = _rejected_candidate(ticker, reason)
             rejected["data_quality"] = validate_market_data_quality(market_snapshot)
+            rejected["feature_provenance"] = build_core_market_feature_provenance(ticker, market_snapshot, data_quality=rejected["data_quality"])
+            rejected["feature_provenance_summary"] = summarize_feature_provenance(rejected["feature_provenance"])
+            rejected["provenance_warnings"] = provenance_warning_messages(rejected["feature_provenance"])
             evaluated_candidates.append(rejected)
             errors.append({"ticker": ticker, "type": "market_data", "message": reason})
             continue
@@ -1141,6 +1155,9 @@ def scan_multi_strategy_candidates(
             if not market_snapshot.get("ok"):
                 candidate = _rejected_candidate(ticker, market_snapshot.get("error", "Market data request failed."))
                 candidate["data_quality"] = validate_market_data_quality(market_snapshot)
+                candidate["feature_provenance"] = build_core_market_feature_provenance(ticker, market_snapshot, data_quality=candidate["data_quality"])
+                candidate["feature_provenance_summary"] = summarize_feature_provenance(candidate["feature_provenance"])
+                candidate["provenance_warnings"] = provenance_warning_messages(candidate["feature_provenance"])
                 candidate.update(
                     {
                         "scan_profile": profile_name,

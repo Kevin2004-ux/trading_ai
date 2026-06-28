@@ -72,6 +72,27 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
         option_rows = [
             {"ticker": ticker, "asset_type": "option", "status": "research_only", "rank": 1, "opportunity_score": 70}
         ] if resolved_include_options else []
+        provider_capabilities = [
+            {
+                "provider_name": "test_market_data",
+                "provider_type": "market_data",
+                "available": True,
+                "authenticated": True,
+                "entitlement_status": "available",
+                "supports_realtime_quotes": True,
+                "supports_historical_bars": True,
+                "supports_options_chain": False,
+                "supports_fundamentals": False,
+                "supports_news": False,
+                "supports_filings": False,
+                "supports_short_interest": False,
+                "rate_limited": False,
+                "degraded": False,
+                "last_checked_at": "2026-06-28T12:00:00+00:00",
+                "warnings": [],
+                "errors": [],
+            }
+        ]
         policy_validation = {
             "ok": True,
             "policy_version": "scan_policy_v1",
@@ -116,10 +137,12 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
                 "auto_log": False,
                 "include_options": resolved_include_options,
                 "discovery_summary": discovery_summary,
+                "provider_capabilities": provider_capabilities,
             },
             "discovery_summary": discovery_summary,
+            "provider_capabilities": provider_capabilities,
             "discovery_result": {"discovery_used": discovery_summary["discovery_used"], "discovered_count": discovery_summary["discovered_count"], "tickers": discovery_summary["tickers"]},
-            "trading_result": {"ok": True, "decision_result": {"logged_recommendations": []}, "discovery_summary": discovery_summary},
+            "trading_result": {"ok": True, "decision_result": {"logged_recommendations": []}, "discovery_summary": discovery_summary, "provider_capabilities": provider_capabilities},
             "option_discovery": {
                 "status": "available" if resolved_include_options else "disabled",
                 "options_final_eligibility": False,
@@ -163,6 +186,7 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
                     "discovered_count": discovery_summary["discovered_count"],
                     "sources_used": discovery_summary["sources_used"],
                     "discovery_summary": discovery_summary,
+                    "provider_capabilities": provider_capabilities,
                     "message": None,
                 },
                 "top_stocks": [
@@ -220,6 +244,7 @@ def _fake_adaptive_execution(captured: dict, ticker: str = "AAPL", include_optio
             "refinement_provider": "none",
             "discovery_result": base["discovery_result"],
             "discovery_summary": base["discovery_summary"],
+            "provider_capabilities": base["provider_capabilities"],
             "passes": [
                 {
                     "pass_number": 1,
@@ -1171,6 +1196,9 @@ def test_api_chat_review_timeout_returns_ranking_unavailable(monkeypatch):
 
     response = client.post("/api/chat", json={"message": "Review AAPL"})
     payload = response.json()
+    deadline = time.time() + 1.0
+    while "internal_controls" not in captured and time.time() < deadline:
+        time.sleep(0.01)
 
     assert response.status_code == 200
     assert payload["ok"] is True
@@ -1325,6 +1353,9 @@ def test_api_chat_broad_stock_scan_uses_bounded_chat_controls(monkeypatch):
     assert payload["discovery_summary"]["discovery_used"] is True
     assert payload["discovery_summary"]["discovered_count"] == 2
     assert payload["assistant_response"]["market_state"]["sources_used"] == ["manual_hotlist"]
+    assert payload["provider_capabilities"][0]["provider_name"] == "test_market_data"
+    assert payload["execution_summary"]["provider_capabilities"][0]["available"] is True
+    assert payload["assistant_response"]["market_state"]["provider_capabilities"][0]["provider_type"] == "market_data"
     assert payload["brokerage_execution_enabled"] is False
     assert payload["paper_trading_only"] is True
     assert POLICY_LIMITS["max_tickers"]["max"] == 500

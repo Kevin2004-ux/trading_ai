@@ -12,6 +12,7 @@ import os
 from discovery import empty_discovery_result, summarize_discovery_result
 from ideas import build_assistant_trade_response, build_best_available_ideas, format_best_ideas_response
 from learning import active_policy_defaults, record_adaptive_research_execution
+from providers.capabilities import summarize_provider_capabilities
 from research.research_orchestrator import build_current_research, empty_research_response, scopes_from_research_preferences
 from scanner.options_discovery import discover_option_ideas, empty_option_discovery_response
 
@@ -121,6 +122,7 @@ def _base_response(policy_validation: dict, root_run_id: str) -> dict:
         "passes": [],
         "discovery_result": empty_discovery_result(),
         "discovery_summary": summarize_discovery_result(empty_discovery_result()),
+        "provider_capabilities": [],
         "consolidated_result": {},
         "best_available_ideas": {},
         "assistant_response": {},
@@ -634,6 +636,40 @@ def _raw_with_source(row: dict, source_pass: int) -> dict:
     return raw
 
 
+def _merge_provider_capabilities(*collections: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    by_key: dict[tuple[str, str], int] = {}
+    for collection in collections:
+        for row in _as_list(collection):
+            if not isinstance(row, dict):
+                continue
+            key = (str(row.get("provider_name") or "unknown"), str(row.get("provider_type") or "unknown"))
+            existing_index = by_key.get(key)
+            if existing_index is None:
+                by_key[key] = len(merged)
+                merged.append(deepcopy(row))
+                continue
+            existing = merged[existing_index]
+            existing_degraded = bool(existing.get("degraded")) or existing.get("available") is False
+            incoming_degraded = bool(row.get("degraded")) or row.get("available") is False
+            if incoming_degraded and not existing_degraded:
+                merged[existing_index] = deepcopy(row)
+    return merged
+
+
+def _provider_capabilities_from_passes(passes: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for pass_result in passes:
+        execution_result = _as_dict(pass_result.get("execution_result"))
+        execution_summary = _as_dict(execution_result.get("execution_summary"))
+        assistant = _as_dict(execution_result.get("assistant_response"))
+        market = _as_dict(assistant.get("market_state"))
+        rows.extend(_as_list(execution_result.get("provider_capabilities")))
+        rows.extend(_as_list(execution_summary.get("provider_capabilities")))
+        rows.extend(_as_list(market.get("provider_capabilities")))
+    return _merge_provider_capabilities(rows)
+
+
 def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dict, max_final_trades: int) -> dict:
     paper: list[dict] = []
     watchlist: list[dict] = []
@@ -658,6 +694,23 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
     paper = _dedupe_research_rows(paper)[:max_final_trades]
     watchlist = _dedupe_research_rows(watchlist)
     blocked = _dedupe_research_rows(blocked)
+    provider_capabilities = _merge_provider_capabilities(
+        summarize_provider_capabilities(
+            {
+                "paper_eligible": paper,
+                "stock_watchlist": watchlist,
+                "blocked_but_interesting": blocked,
+            },
+            fallback_to_configured=False,
+        ),
+        _provider_capabilities_from_passes(passes),
+    ) or summarize_provider_capabilities(
+        {
+            "paper_eligible": paper,
+            "stock_watchlist": watchlist,
+            "blocked_but_interesting": blocked,
+        }
+    )
     return {
         "ok": True,
         "mode": "adaptive_consolidated",
@@ -694,6 +747,7 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
         },
         "discovery_result": discovery_result,
         "discovery_summary": summarize_discovery_result(discovery_result),
+        "provider_capabilities": provider_capabilities,
         "partial_results": partial_results,
         "errors": [],
         "adaptive_data_missing": _unique_texts(data_missing),
@@ -998,6 +1052,7 @@ def execute_adaptive_scan_plan(
             warnings=warnings,
         )
         response["consolidated_result"] = consolidated
+        response["provider_capabilities"] = consolidated.get("provider_capabilities", [])
         response["best_available_ideas"] = best
         response["assistant_response"] = assistant
         response["option_discovery"] = _as_dict(consolidated.get("option_discovery"))

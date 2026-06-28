@@ -14,6 +14,30 @@ def _stock(
     rs_label="outperforming",
     failed_constraints=None,
 ):
+    feature_provenance = {
+        "current_price": {
+            "feature_name": "current_price",
+            "feature_value_available": True,
+            "provider": "test_market_data",
+            "provider_type": "market_data",
+            "source": "quote.last_price",
+            "allowed_for_recommendation": True,
+            "allowed_for_research_only": True,
+            "warnings": [],
+            "errors": [],
+        },
+        "sma_20": {
+            "feature_name": "sma_20",
+            "feature_value_available": True,
+            "provider": "test_market_data",
+            "provider_type": "market_data",
+            "source": "technical_snapshot",
+            "allowed_for_recommendation": True,
+            "allowed_for_research_only": True,
+            "warnings": [],
+            "errors": [],
+        },
+    }
     return {
         "ticker": ticker,
         "asset_type": "stock",
@@ -33,6 +57,16 @@ def _stock(
         "relative_volume": relative_volume,
         "atr_percent": 0.04,
         "data_quality": {"ok": True, "quality_label": "good", "errors": [], "warnings": []},
+        "feature_provenance": feature_provenance,
+        "feature_provenance_summary": {
+            "feature_count": 2,
+            "available_count": 2,
+            "allowed_for_recommendation_count": 2,
+            "unsafe_features": [],
+            "providers": ["test_market_data"],
+            "warnings": [],
+            "errors": [],
+        },
         "data_freshness": {"ok": True, "freshness_label": "fresh"},
         "technical_confirmation_summary": {
             "status": technical_status,
@@ -209,6 +243,9 @@ def test_broad_plan_with_dynamic_discovery_uses_discovered_tickers(monkeypatch):
     assert result["execution_summary"]["ticker_count_executed"] == 2
     assert result["execution_summary"]["discovery_used"] is True
     assert result["execution_summary"]["discovery_summary"]["discovery_used"] is True
+    assert result["execution_summary"]["provider_capabilities"]
+    assert result["assistant_response"]["market_state"]["provider_capabilities"]
+    assert result["assistant_response"]["market_state"]["provider_capabilities"][0]["provider_name"] == "test_market_data"
 
 
 def test_custom_ticker_plan_bypasses_dynamic_discovery(monkeypatch):

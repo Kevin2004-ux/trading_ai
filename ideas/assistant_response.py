@@ -358,6 +358,13 @@ def _discovery_summary(trading_result: dict) -> dict:
     return summarize_discovery_result(_as_dict(root.get("discovery_result") or trade_hunt.get("discovery_result")))
 
 
+def _provider_capabilities(trading_result: dict) -> list[dict]:
+    root = _as_dict(trading_result)
+    trade_hunt = _as_dict(root.get("trade_hunt"))
+    summary = root.get("provider_capabilities") or trade_hunt.get("provider_capabilities")
+    return summary if isinstance(summary, list) else []
+
+
 def _scan_summary(trading_result: dict, run_id: str | None, include_options: bool, partial_results: bool) -> dict:
     root = _as_dict(trading_result)
     trade_hunt = _as_dict(root.get("trade_hunt"))
@@ -475,6 +482,7 @@ def build_assistant_trade_response(
     partial = _partial_results(best_ideas, trading_result)
     provider_status = _provider_status(best_ideas)
     discovery = _discovery_summary(trading_result)
+    provider_capabilities = _provider_capabilities(trading_result)
     market_message = None
     if ranking_status == "unavailable":
         market_message = "Ranking unavailable because usable market data was not returned."
@@ -500,6 +508,7 @@ def build_assistant_trade_response(
             "discovered_count": discovery.get("discovered_count", 0),
             "sources_used": list(_as_list(discovery.get("sources_used"))),
             "discovery_summary": discovery,
+            "provider_capabilities": provider_capabilities,
             "message": market_message,
         },
         "top_stocks": stock_rows if requested != "options" else [],
