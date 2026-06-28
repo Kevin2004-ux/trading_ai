@@ -861,6 +861,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
     best_ideas = execution_result.get("best_available_ideas") if isinstance(execution_result, dict) else {}
     assistant_response = execution_result.get("assistant_response") if isinstance(execution_result, dict) else {}
     discovery_result = execution_result.get("discovery_result") if isinstance(execution_result, dict) else {}
+    discovery_summary = execution_result.get("discovery_summary") if isinstance(execution_result, dict) else {}
     trading_result = (
         execution_result.get("consolidated_result", {})
         if use_adaptive and isinstance(execution_result, dict)
@@ -871,6 +872,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
         "scan_result": execution_result,
         "trading_result": trading_result,
         "discovery_result": discovery_result,
+        "discovery_summary": discovery_summary,
         "best_available_ideas": best_ideas,
         "assistant_response": assistant_response,
         "formatted_best_ideas_summary": execution_result.get("formatted_response") or format_best_ideas_response(assistant_response),
@@ -892,7 +894,7 @@ def _run_best_ideas_chat_scan(message: str, db_path: str, timeout_seconds: float
                 "passes_executed": execution_result.get("passes_executed"),
                 "stop_reason": execution_result.get("stop_reason"),
                 "refinement_used": execution_result.get("refinement_used"),
-                "discovery_result": discovery_result,
+                "discovery_summary": discovery_summary,
             }
             if use_adaptive and isinstance(execution_result, dict)
             else execution_result.get("execution_summary", {}) if isinstance(execution_result, dict) else {}
@@ -992,6 +994,7 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
             "scan_result": best_ideas_payload["scan_result"],
             "trading_result": best_ideas_payload["trading_result"],
             "discovery_result": best_ideas_payload.get("discovery_result", {}),
+            "discovery_summary": best_ideas_payload.get("discovery_summary", {}),
             "formatted_best_ideas_summary": answer,
             "planner": planner_result,
             "planner_provider": planner_result.get("provider"),
@@ -1021,6 +1024,7 @@ def _chat_payload(message: str, db_path: str = "strategy_library.db") -> dict:
                 "approved_plan": best_ideas_payload["approved_plan"],
                 "execution_summary": best_ideas_payload["execution_summary"],
                 "discovery_result": best_ideas_payload.get("discovery_result", {}),
+                "discovery_summary": best_ideas_payload.get("discovery_summary", {}),
                 "refinement_used": bool(best_ideas_payload.get("refinement_used")),
                 "passes_executed": int(best_ideas_payload.get("passes_executed") or 1),
                 "refinement_stop_reason": best_ideas_payload.get("refinement_stop_reason") or "",

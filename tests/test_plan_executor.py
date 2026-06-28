@@ -165,8 +165,8 @@ def test_broad_plan_with_dynamic_discovery_uses_discovered_tickers(monkeypatch):
             "requested_sources": kwargs.get("requested_sources", []),
             "sources_used": ["manual_hotlist"],
             "candidates": [
-                {"ticker": "MSFT", "source_type": "manual_hotlist", "discovery_score": 98, "requires_live_validation": True},
-                {"ticker": "NVDA", "source_type": "manual_hotlist", "discovery_score": 97, "requires_live_validation": True},
+                {"ticker": "MSFT", "source_type": "manual_hotlist", "discovery_score": 98, "reasons": ["Manual hotlist."], "requires_live_validation": True, "point_in_time_safe": True},
+                {"ticker": "NVDA", "source_type": "manual_hotlist", "discovery_score": 97, "reasons": ["Manual hotlist."], "requires_live_validation": True, "point_in_time_safe": True},
             ],
             "tickers": ["MSFT", "NVDA"],
             "discovered_count": 2,
@@ -200,8 +200,15 @@ def test_broad_plan_with_dynamic_discovery_uses_discovered_tickers(monkeypatch):
     assert result["brokerage_execution_enabled"] is False
     assert result["universe_result"]["source"] == "dynamic_discovery"
     assert result["discovery_result"]["discovered_count"] == 2
+    assert result["discovery_summary"]["discovery_used"] is True
+    assert result["discovery_summary"]["discovered_count"] == 2
+    assert result["discovery_summary"]["sources_used"] == ["manual_hotlist"]
+    assert result["discovery_summary"]["top_candidates"][0]["ticker"] == "MSFT"
+    assert result["assistant_response"]["market_state"]["discovery_used"] is True
+    assert result["assistant_response"]["market_state"]["discovered_count"] == 2
     assert result["execution_summary"]["ticker_count_executed"] == 2
     assert result["execution_summary"]["discovery_used"] is True
+    assert result["execution_summary"]["discovery_summary"]["discovery_used"] is True
 
 
 def test_custom_ticker_plan_bypasses_dynamic_discovery(monkeypatch):
@@ -233,6 +240,27 @@ def test_custom_ticker_plan_bypasses_dynamic_discovery(monkeypatch):
     assert captured["run_kwargs"]["tickers"] == ["AAPL"]
     assert result["universe_result"]["source"] == "scan_plan_combined"
     assert result["execution_summary"]["ticker_count_executed"] == 1
+    assert result["discovery_summary"]["discovery_used"] is False
+    assert result["discovery_summary"]["bypass_reason"] == "explicit_ticker_scope"
+    assert result["assistant_response"]["market_state"]["discovery_summary"]["bypass_reason"] == "explicit_ticker_scope"
+
+
+def test_explicit_ticker_review_reports_bypass_even_without_discovery_controls(monkeypatch):
+    monkeypatch.setattr("planning.plan_executor.run_weekly_trade_hunt", lambda **kwargs: _fake_trading_result())
+
+    result = execute_scan_plan(
+        {
+            "requested_instrument": "stocks",
+            "objective": "ticker_review",
+            "universes": ["custom"],
+            "custom_tickers": ["AAPL"],
+            "max_tickers": 1,
+        }
+    )
+
+    assert result["discovery_summary"]["discovery_used"] is False
+    assert result["discovery_summary"]["bypass_reason"] == "explicit_ticker_scope"
+    assert result["assistant_response"]["market_state"]["discovery_summary"]["bypass_reason"] == "explicit_ticker_scope"
 
 
 def test_empty_dynamic_discovery_falls_back_to_combined_universe(monkeypatch):
@@ -270,8 +298,56 @@ def test_empty_dynamic_discovery_falls_back_to_combined_universe(monkeypatch):
     assert captured["run_kwargs"]["tickers"] == ["AAPL", "MSFT", "NVDA"]
     assert result["universe_result"]["source"] == "scan_plan_combined"
     assert result["discovery_result"]["discovered_count"] == 0
+    assert result["discovery_summary"]["fallback_used"] is True
+    assert result["discovery_summary"]["discovery_used"] is False
+    assert result["execution_summary"]["discovery_summary"]["fallback_used"] is True
     assert any("falling back" in warning.lower() for warning in result["warnings"])
     assert result["execution_summary"]["auto_log"] is False
+
+
+def test_discovery_score_does_not_replace_final_candidate_scores(monkeypatch):
+    def fake_discover_candidates(**kwargs):
+        return {
+            "ok": True,
+            "discovery_version": "candidate_discovery_v1",
+            "discovered_at": "2026-06-28T12:00:00+00:00",
+            "as_of": "2026-06-28T12:00:00+00:00",
+            "requested_sources": ["manual_hotlist"],
+            "sources_used": ["manual_hotlist"],
+            "candidates": [
+                {"ticker": "MSFT", "source_type": "manual_hotlist", "discovery_score": 99, "requires_live_validation": True},
+            ],
+            "tickers": ["MSFT"],
+            "discovered_count": 1,
+            "warnings": [],
+            "errors": [],
+            "point_in_time_safe": True,
+            "requires_live_validation": True,
+        }
+
+    def fake_run_weekly_trade_hunt(**kwargs):
+        result = _fake_trading_result()
+        result["decision_result"]["final_recommendations"] = []
+        result["selection_result"]["watchlist_alternatives"] = [_stock("MSFT", status="watchlist", score=42)]
+        result["selection_result"]["rejected_candidates"] = []
+        result["scan_result"]["watchlist_candidates"] = [_stock("MSFT", status="watchlist", score=42)]
+        result["scan_result"]["rejected_candidates"] = []
+        return result
+
+    monkeypatch.setattr("planning.plan_executor.discover_candidates", fake_discover_candidates)
+    monkeypatch.setattr("planning.plan_executor.run_weekly_trade_hunt", fake_run_weekly_trade_hunt)
+
+    result = execute_scan_plan(
+        {"requested_instrument": "stocks", "objective": "best_ideas", "universes": ["large_cap"], "max_tickers": 5},
+        internal_controls={"use_dynamic_discovery": True, "max_discovered_tickers": 1},
+    )
+
+    top_stock = result["assistant_response"]["top_stocks"][0]
+    assert result["discovery_summary"]["top_candidates"][0]["discovery_score"] == 99
+    assert top_stock["engine_score"] == 42
+    assert top_stock["opportunity_score"] != 99
+    assert top_stock["status"] == "watchlist"
+    assert top_stock["rank"] == 1
 
 
 def test_options_execution_not_ready_keeps_final_option_eligibility_false(monkeypatch):

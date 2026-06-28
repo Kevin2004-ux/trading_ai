@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 
-from discovery import empty_discovery_result
+from discovery import empty_discovery_result, summarize_discovery_result
 from ideas import build_assistant_trade_response, build_best_available_ideas, format_best_ideas_response
 from learning import active_policy_defaults, record_adaptive_research_execution
 from research.research_orchestrator import build_current_research, empty_research_response, scopes_from_research_preferences
@@ -120,6 +120,7 @@ def _base_response(policy_validation: dict, root_run_id: str) -> dict:
         "refinement_provider": "none",
         "passes": [],
         "discovery_result": empty_discovery_result(),
+        "discovery_summary": summarize_discovery_result(empty_discovery_result()),
         "consolidated_result": {},
         "best_available_ideas": {},
         "assistant_response": {},
@@ -640,11 +641,14 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
     data_missing: list[str] = []
     system_issues: list[str] = []
     partial_results = False
+    discovery_result = empty_discovery_result()
     for pass_result in passes:
         pass_number = _safe_int(pass_result.get("pass_number"), 1)
         evaluation = _as_dict(pass_result.get("evaluation"))
         partial_results = partial_results or bool(evaluation.get("partial_results"))
         best = _as_dict(_as_dict(pass_result.get("execution_result")).get("best_available_ideas"))
+        if not _as_dict(discovery_result).get("discovery_used") and not _as_dict(discovery_result).get("bypass_reason"):
+            discovery_result = _as_dict(_as_dict(pass_result.get("execution_result")).get("discovery_result")) or discovery_result
         paper.extend(_raw_with_source(row, pass_number) for row in _as_list(best.get("paper_eligible")) if isinstance(row, dict) and str(row.get("asset_type", "stock")).lower() != "option")
         watchlist.extend(_raw_with_source(row, pass_number) for row in _as_list(best.get("stock_watchlist")) if isinstance(row, dict))
         blocked.extend(_raw_with_source(row, pass_number) for row in _as_list(best.get("blocked_but_interesting")) if isinstance(row, dict) and str(row.get("asset_type", "stock")).lower() != "option")
@@ -688,6 +692,8 @@ def _synthetic_trading_result_from_passes(passes: list[dict], approved_plan: dic
             "adaptive_consolidated": True,
             "partial_results": partial_results,
         },
+        "discovery_result": discovery_result,
+        "discovery_summary": summarize_discovery_result(discovery_result),
         "partial_results": partial_results,
         "errors": [],
         "adaptive_data_missing": _unique_texts(data_missing),
@@ -980,6 +986,7 @@ def execute_adaptive_scan_plan(
     response["stop_reason"] = stop_reason or "Adaptive execution completed."
     if response["passes"]:
         response["discovery_result"] = _first_pass_discovery_result(response["passes"])
+        response["discovery_summary"] = summarize_discovery_result(response["discovery_result"])
         consolidated, best, assistant, research, formatted = _finalize_consolidated_response(
             passes=response["passes"],
             approved_plan=initial_approved,

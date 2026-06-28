@@ -43,6 +43,32 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
                 "internal_controls": dict(internal_controls or {}),
             }
         )
+        explicit_scope = plan_payload.get("objective") == "ticker_review" or bool(plan_payload.get("custom_tickers"))
+        discovery_enabled = bool((internal_controls or {}).get("use_dynamic_discovery")) and not explicit_scope
+        discovery_summary = {
+            "discovery_used": discovery_enabled,
+            "discovered_count": 2 if discovery_enabled else 0,
+            "sources_used": ["manual_hotlist"] if discovery_enabled else [],
+            "requested_sources": list((internal_controls or {}).get("discovery_sources", [])),
+            "tickers": ["MSFT", "NVDA"] if discovery_enabled else [],
+            "top_candidates": [
+                {
+                    "ticker": "MSFT",
+                    "discovery_score": 98,
+                    "source_type": "manual_hotlist",
+                    "reason_discovered": "Manual hotlist.",
+                    "reasons": ["Manual hotlist."],
+                    "requires_live_validation": True,
+                    "point_in_time_safe": True,
+                }
+            ] if discovery_enabled else [],
+            "warnings": [],
+            "errors": [],
+            "fallback_used": False,
+            "bypass_reason": "explicit_ticker_scope" if explicit_scope else None,
+            "point_in_time_safe": True,
+            "requires_live_validation": True,
+        }
         option_rows = [
             {"ticker": ticker, "asset_type": "option", "status": "research_only", "rank": 1, "opportunity_score": 70}
         ] if resolved_include_options else []
@@ -89,8 +115,11 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
                 "universes_used": plan_payload.get("universes", ["large_cap", "active", "tech"]),
                 "auto_log": False,
                 "include_options": resolved_include_options,
+                "discovery_summary": discovery_summary,
             },
-            "trading_result": {"ok": True, "decision_result": {"logged_recommendations": []}},
+            "discovery_summary": discovery_summary,
+            "discovery_result": {"discovery_used": discovery_summary["discovery_used"], "discovered_count": discovery_summary["discovered_count"], "tickers": discovery_summary["tickers"]},
+            "trading_result": {"ok": True, "decision_result": {"logged_recommendations": []}, "discovery_summary": discovery_summary},
             "option_discovery": {
                 "status": "available" if resolved_include_options else "disabled",
                 "options_final_eligibility": False,
@@ -125,7 +154,17 @@ def _fake_planned_execution(captured: dict, ticker: str = "AAPL", include_option
                 "paper_trading_only": True,
                 "ranking_status": "available",
                 "requested_instrument": requested,
-                "market_state": {"provider_status": "available", "market_regime": None, "data_freshness": None, "partial_results": False, "message": None},
+                "market_state": {
+                    "provider_status": "available",
+                    "market_regime": None,
+                    "data_freshness": None,
+                    "partial_results": False,
+                    "discovery_used": discovery_summary["discovery_used"],
+                    "discovered_count": discovery_summary["discovered_count"],
+                    "sources_used": discovery_summary["sources_used"],
+                    "discovery_summary": discovery_summary,
+                    "message": None,
+                },
                 "top_stocks": [
                     {"ticker": ticker, "asset_type": "stock", "status": "watchlist", "rank": 1, "opportunity_score": 80}
                 ] if requested != "options" else [],
@@ -179,6 +218,8 @@ def _fake_adaptive_execution(captured: dict, ticker: str = "AAPL", include_optio
             "stop_reason": "Sufficient legitimate research results found.",
             "refinement_used": False,
             "refinement_provider": "none",
+            "discovery_result": base["discovery_result"],
+            "discovery_summary": base["discovery_summary"],
             "passes": [
                 {
                     "pass_number": 1,
@@ -1109,6 +1150,9 @@ def test_api_chat_route_returns_structured_assistant_response(monkeypatch):
     assert captured["proposed_plan"]["custom_tickers"] == ["AAPL"]
     assert captured["internal_controls"]["scan_total_timeout_seconds"] <= 45.0
     assert "use_dynamic_discovery" not in captured["internal_controls"]
+    assert payload["discovery_summary"]["discovery_used"] is False
+    assert payload["discovery_summary"]["bypass_reason"] == "explicit_ticker_scope"
+    assert payload["assistant_response"]["market_state"]["discovery_used"] is False
 
 
 @pytest.mark.skipif(not UI_ROUTE_TEST_DEPS_AVAILABLE, reason="fastapi/httpx is not installed in the local test environment.")
@@ -1278,6 +1322,9 @@ def test_api_chat_broad_stock_scan_uses_bounded_chat_controls(monkeypatch):
     assert captured["internal_controls"]["discovery_sources"] == ["manual_hotlist", "database_recent", "liquid_fallback"]
     assert captured["internal_controls"]["scan_total_timeout_seconds"] < 45.0
     assert captured["include_options"] is False
+    assert payload["discovery_summary"]["discovery_used"] is True
+    assert payload["discovery_summary"]["discovered_count"] == 2
+    assert payload["assistant_response"]["market_state"]["sources_used"] == ["manual_hotlist"]
     assert payload["brokerage_execution_enabled"] is False
     assert payload["paper_trading_only"] is True
     assert POLICY_LIMITS["max_tickers"]["max"] == 500
@@ -1301,6 +1348,7 @@ def test_api_chat_broad_stock_scan_defaults_fit_bridge_timeout(monkeypatch):
     assert captured["proposed_plan"]["max_candidates"] == 6
     assert captured["internal_controls"]["use_dynamic_discovery"] is True
     assert captured["internal_controls"]["max_discovered_tickers"] == 6
+    assert response.json()["discovery_summary"]["discovery_used"] is True
     assert captured["internal_controls"]["scan_total_timeout_seconds"] <= 9.0
     assert captured["internal_controls"]["scan_ticker_timeout_seconds"] <= 4.0
     assert captured["internal_controls"]["scan_total_timeout_seconds"] < 45.0

@@ -9,7 +9,7 @@ from typing import Any
 from scanner.universe_builder import validate_ticker_universe
 
 from .fallback_universe import DEFAULT_FALLBACK_UNIVERSES, discover_liquid_fallback_candidates
-from .source_models import DISCOVERY_VERSION, DiscoveryCandidate, empty_discovery_result, safe_float, unique_texts, utc_now_iso
+from .source_models import DISCOVERY_VERSION, MAX_DISCOVERED_TICKERS, DiscoveryCandidate, empty_discovery_result, safe_float, unique_texts, utc_now_iso
 
 
 DEFAULT_DISCOVERY_SOURCES = ["manual_hotlist", "database_recent", "liquid_fallback"]
@@ -250,7 +250,7 @@ def discover_candidates(
 ) -> dict[str, Any]:
     timestamp = discovered_at or utc_now_iso()
     sources = requested_sources or DEFAULT_DISCOVERY_SOURCES
-    max_count = _bounded_int(max_tickers, 20, minimum=1, maximum=100)
+    max_count = _bounded_int(max_tickers, 20, minimum=1, maximum=MAX_DISCOVERED_TICKERS)
     warnings: list[str] = []
     errors: list[str] = []
     candidates: list[dict[str, Any]] = []
@@ -288,6 +288,10 @@ def discover_candidates(
         "errors": unique_texts(errors),
         "point_in_time_safe": all(bool(candidate.get("point_in_time_safe", True)) for candidate in merged),
         "requires_live_validation": True,
+        "discovery_used": False,
+        "fallback_used": False,
+        "bypass_reason": None,
+        "max_discovered_tickers": max_count,
     }
 
 

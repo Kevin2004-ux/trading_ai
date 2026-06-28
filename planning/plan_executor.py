@@ -5,7 +5,13 @@ from typing import Any
 from uuid import uuid4
 
 from agent.trading_brain import run_weekly_trade_hunt
-from discovery import DEFAULT_DISCOVERY_SOURCES, discover_candidates, empty_discovery_result
+from discovery import (
+    DEFAULT_DISCOVERY_SOURCES,
+    MAX_DISCOVERED_TICKERS,
+    discover_candidates,
+    empty_discovery_result,
+    summarize_discovery_result,
+)
 from ideas import build_assistant_trade_response, build_best_available_ideas, format_best_ideas_response
 from learning import active_policy_defaults, record_research_execution
 from research.research_orchestrator import build_current_research, empty_research_response, scopes_from_research_preferences
@@ -92,6 +98,7 @@ def _base_response(
         "execution_config": policy_validation.get("execution_config", {}),
         "universe_result": _empty_universe_result(),
         "discovery_result": empty_discovery_result(),
+        "discovery_summary": summarize_discovery_result(empty_discovery_result()),
         "execution_summary": _empty_execution_summary(),
         "trading_result": {},
         "option_discovery": empty_option_discovery_response(requested=False, reason="Option discovery was not requested."),
@@ -185,7 +192,20 @@ def _is_broad_discovery_plan(approved_plan: dict, execution_config: dict, contro
 
 def _max_discovered_tickers(controls: dict, execution_config: dict) -> int:
     default = int(execution_config.get("max_tickers") or 20)
-    return max(1, min(_control_int(controls, "max_discovered_tickers", default), 100))
+    return max(1, min(_control_int(controls, "max_discovered_tickers", default), MAX_DISCOVERED_TICKERS))
+
+
+def _discovery_bypass_reason(approved_plan: dict, execution_config: dict, controls: dict) -> str | None:
+    objective = str(approved_plan.get("objective") or "best_ideas").lower()
+    if objective == "ticker_review":
+        return "explicit_ticker_scope"
+    if approved_plan.get("custom_tickers") or execution_config.get("custom_tickers"):
+        return "custom_ticker_scope"
+    if not controls.get("use_dynamic_discovery"):
+        return "not_requested"
+    if objective not in {"best_ideas", "watchlist", "options_research"}:
+        return "unsupported_objective"
+    return None
 
 
 def _build_execution_universe(
@@ -195,8 +215,9 @@ def _build_execution_universe(
     controls: dict,
     db_path: str,
 ) -> tuple[dict, dict]:
-    if not _is_broad_discovery_plan(approved_plan, execution_config, controls):
-        return build_combined_universe(execution_config), empty_discovery_result()
+    bypass_reason = _discovery_bypass_reason(approved_plan, execution_config, controls)
+    if bypass_reason:
+        return build_combined_universe(execution_config), empty_discovery_result(bypass_reason=bypass_reason)
 
     max_discovered = _max_discovered_tickers(controls, execution_config)
     discovery_result = discover_candidates(
@@ -208,6 +229,15 @@ def _build_execution_universe(
     validated = validate_ticker_universe(discovered_tickers, max_tickers=max_discovered)
     if validated.get("ok"):
         warnings = list(_as_list(discovery_result.get("warnings"))) + list(_as_list(validated.get("errors")))
+        discovery_result = {
+            **discovery_result,
+            "tickers": validated.get("tickers", []),
+            "discovered_count": len(validated.get("tickers", [])),
+            "discovery_used": True,
+            "fallback_used": False,
+            "bypass_reason": None,
+            "max_discovered_tickers": max_discovered,
+        }
         universe_result = {
             "ok": True,
             "universes_requested": list(_as_list(execution_config.get("universes"))),
@@ -225,6 +255,13 @@ def _build_execution_universe(
         return universe_result, discovery_result
 
     fallback = build_combined_universe(execution_config)
+    discovery_result = {
+        **discovery_result,
+        "discovery_used": False,
+        "fallback_used": True,
+        "bypass_reason": None,
+        "max_discovered_tickers": max_discovered,
+    }
     fallback["warnings"] = list(_as_list(fallback.get("warnings"))) + list(_as_list(discovery_result.get("warnings"))) + [
         "Dynamic discovery returned no valid tickers; falling back to the approved combined universe."
     ]
@@ -453,6 +490,7 @@ def execute_scan_plan(
     )
     response["universe_result"] = universe_result
     response["discovery_result"] = discovery_result
+    response["discovery_summary"] = summarize_discovery_result(discovery_result)
     if universe_result.get("warnings"):
         warnings.extend(str(item) for item in universe_result.get("warnings", []))
     if not universe_result.get("ok"):
@@ -470,6 +508,7 @@ def execute_scan_plan(
                 "options_final_eligibility": bool(execution_config.get("options_final_eligibility")),
                 "auto_log": False,
                 "effective_direction": effective_direction,
+                "discovery_summary": response["discovery_summary"],
                 "unapplied_preferences": _unapplied_preferences(approved_plan, execution_config, policy_validation.get("proposed_plan")),
             }
         )
@@ -508,6 +547,7 @@ def execute_scan_plan(
             "errors": [],
             "warnings": universe_result.get("warnings", []),
             "discovery_result": discovery_result if universe_result.get("source") == "dynamic_discovery" else None,
+            "discovery_summary": response["discovery_summary"],
         },
         max_total_candidates=int(execution_config.get("max_candidates") or 20),
         scanner_config={
@@ -516,6 +556,8 @@ def execute_scan_plan(
         },
     )
     response["trading_result"] = trading_result if isinstance(trading_result, dict) else {}
+    response["trading_result"]["discovery_result"] = discovery_result
+    response["trading_result"]["discovery_summary"] = response["discovery_summary"]
 
     opportunity_weights = _as_dict(execution_config.get("opportunity_weights")) or _as_dict(_as_dict(active_policy.get("policy")).get("stock_opportunity_weights"))
     stock_only_best_ideas = build_best_available_ideas(
@@ -617,6 +659,7 @@ def execute_scan_plan(
             "effective_direction": effective_direction,
             "unapplied_preferences": unapplied,
             "discovery_used": universe_result.get("source") == "dynamic_discovery",
+            "discovery_summary": response["discovery_summary"],
         }
     )
     response["warnings"] = list(dict.fromkeys(str(item) for item in warnings if item))

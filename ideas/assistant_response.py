@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from discovery.source_models import summarize_discovery_result
+
 
 TOP_LIST_LIMIT = 5
 
@@ -347,6 +349,15 @@ def _partial_results(best_ideas: dict, trading_result: dict) -> bool:
     return bool(best_ideas.get("system_issues") or best_ideas.get("data_missing")) and best_ideas.get("ranking_status") == "available"
 
 
+def _discovery_summary(trading_result: dict) -> dict:
+    root = _as_dict(trading_result)
+    trade_hunt = _as_dict(root.get("trade_hunt"))
+    summary = _as_dict(root.get("discovery_summary") or trade_hunt.get("discovery_summary"))
+    if summary:
+        return summary
+    return summarize_discovery_result(_as_dict(root.get("discovery_result") or trade_hunt.get("discovery_result")))
+
+
 def _scan_summary(trading_result: dict, run_id: str | None, include_options: bool, partial_results: bool) -> dict:
     root = _as_dict(trading_result)
     trade_hunt = _as_dict(root.get("trade_hunt"))
@@ -463,6 +474,7 @@ def build_assistant_trade_response(
     blocked = [row for row in stock_rows + option_rows if row.get("status") == "blocked"]
     partial = _partial_results(best_ideas, trading_result)
     provider_status = _provider_status(best_ideas)
+    discovery = _discovery_summary(trading_result)
     market_message = None
     if ranking_status == "unavailable":
         market_message = "Ranking unavailable because usable market data was not returned."
@@ -484,6 +496,10 @@ def build_assistant_trade_response(
             "market_regime": _extract_market_regime(trading_result),
             "data_freshness": _extract_data_freshness(trading_result),
             "partial_results": partial,
+            "discovery_used": bool(discovery.get("discovery_used")),
+            "discovered_count": discovery.get("discovered_count", 0),
+            "sources_used": list(_as_list(discovery.get("sources_used"))),
+            "discovery_summary": discovery,
             "message": market_message,
         },
         "top_stocks": stock_rows if requested != "options" else [],

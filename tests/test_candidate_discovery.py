@@ -1,6 +1,6 @@
 import sqlite3
 
-from discovery import discover_candidates
+from discovery import MAX_DISCOVERED_TICKERS, discover_candidates, summarize_discovery_result
 from discovery.candidate_discovery import (
     discover_database_recent_candidates,
     discover_liquid_fallback_candidates,
@@ -112,3 +112,57 @@ def test_database_discovery_uses_recent_local_candidate_rows(tmp_path):
     assert candidates[0]["discovery_score"] > 0
     assert "opportunity_score" not in candidates[0]
     assert "score" not in candidates[0]
+
+
+def test_unknown_discovery_source_warns_and_continues_with_fallback():
+    result = discover_candidates(
+        requested_sources=["mystery_feed", "liquid_fallback"],
+        max_tickers=3,
+        discovered_at="2026-06-28T12:00:00+00:00",
+    )
+
+    assert result["ok"] is True
+    assert result["discovered_count"] == 3
+    assert result["sources_used"] == ["liquid_fallback"]
+    assert any("Unknown discovery source ignored: mystery_feed" in warning for warning in result["warnings"])
+
+
+def test_max_discovered_tickers_is_clamped_to_safe_internal_max():
+    result = discover_candidates(
+        requested_sources=["liquid_fallback"],
+        max_tickers=500,
+        discovered_at="2026-06-28T12:00:00+00:00",
+    )
+
+    assert result["max_discovered_tickers"] == MAX_DISCOVERED_TICKERS
+    assert result["discovered_count"] <= MAX_DISCOVERED_TICKERS
+
+
+def test_compact_discovery_summary_shape_is_frontend_safe():
+    result = discover_candidates(
+        requested_sources=["liquid_fallback"],
+        max_tickers=3,
+        discovered_at="2026-06-28T12:00:00+00:00",
+    )
+    result["discovery_used"] = True
+    summary = summarize_discovery_result(result)
+
+    assert summary["discovery_used"] is True
+    assert summary["discovered_count"] == 3
+    assert summary["sources_used"] == ["liquid_fallback"]
+    assert len(summary["top_candidates"]) == 3
+    top = summary["top_candidates"][0]
+    assert set(top).issuperset(
+        {
+            "ticker",
+            "discovery_score",
+            "requires_live_validation",
+            "point_in_time_safe",
+            "reasons",
+            "reason_discovered",
+        }
+    )
+    assert "raw_metadata" not in top
+    assert "opportunity_score" not in top
+    assert "score" not in top
+    assert "rank" not in top
